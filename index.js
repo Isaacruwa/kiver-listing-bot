@@ -259,7 +259,19 @@ async function poll() {
           await tg("sendMessage",{
             chat_id:msg.chat.id,
             text:"Send only the Telegram bot link.\n\nE.x : https://t.me/getkiverbot",
-            reply_markup:{inline_keyboard:[[{text:"Admin Panel",url:"https://getkiver.com/admin"}]]}
+            reply_markup:{keyboard:[[{text:"Admin Panel"}]],resize_keyboard:true}
+          });
+          continue;
+        }
+
+        if(text === "Admin Panel"){
+          await tg("sendMessage",{
+            chat_id:msg.chat.id,
+            text:"Admin Panel\n\nUse the controls below to manage the Kiver listing bot.",
+            reply_markup:{inline_keyboard:[
+              [{text:"Register Channel",callback_data:"admin_register_channel"}],
+              [{text:"Announcement Queue",callback_data:"admin_queue"}]
+            ]}
           });
           continue;
         }
