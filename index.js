@@ -1,5 +1,7 @@
 const http = require("http");
 const crypto = require("crypto");
+const fs = require("fs");
+const path = require("path");
 
 const PORT = Number(process.env.PORT || 10000);
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -11,6 +13,13 @@ if (!TELEGRAM_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
 const BOT_EMAIL = process.env.KIVER_AUTOMATION_EMAIL || "listing-bot@kiver.internal";
 const BOT_PASSWORD = process.env.KIVER_AUTOMATION_PASSWORD || crypto.createHash("sha256").update(TELEGRAM_TOKEN).digest("hex");
+const DATA_DIR = process.env.KIVER_DATA_DIR || path.join(__dirname, "data");
+const STATE_FILE = path.join(DATA_DIR, "channel-state.json");
+function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[]}; } catch(_) { return {channels:[],announced:[]}; } }
+const state=loadState();
+function saveState(){ fs.mkdirSync(DATA_DIR,{recursive:true}); fs.writeFileSync(STATE_FILE,JSON.stringify(state,null,2)); }
+if(KIVER_CHANNEL_ID && !state.channels.includes(KIVER_CHANNEL_ID)){ state.channels.push(KIVER_CHANNEL_ID); saveState(); }
+
 
 async function tg(method, body={}) {
   const r = await fetch("https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/"+method, {
@@ -48,6 +57,14 @@ function parseLink(text) {
   const username = m[1].replace(/^@/,"");
   if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
   return {username, url:"https://t.me/"+username};
+}
+
+function parseChannelLink(text){
+  const m=String(text||"").trim().match(/https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\/([^\s/?#]+)/i);
+  if(!m) return null;
+  const username=m[1].replace(/^@/,"");
+  if(!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
+  return "@"+username;
 }
 
 function decode(s) {
@@ -115,11 +132,55 @@ function passesFilters(b) {
   const username=String(b.telegramUsername||"").trim();
   if(!name) return "Bot name is missing.";
   if(!b.imageUrl) return "A profile photo is required.";
-  if(about.length < 50) return "The Telegram About section is too short.";
-  if(about.length > 255) return "The Telegram About section is too long.";
+  if(about.length < 40) return "The Telegram About section is too short.";
   const hay=[name,username,about].join("\n");
   if(BLOCKED.some(re=>re.test(hay))) return "This bot does not meet Kiver listing requirements.";
   return null;
+}
+
+async function registerChannel(chatId,link){
+  const ref=parseChannelLink(link);
+  if(!ref){ await tg("sendMessage",{chat_id:chatId,text:"Send a public Telegram channel link, for example:\nhttps://t.me/yourchannel"}); return; }
+  const chat=await tg("getChat",{chat_id:ref});
+  if(chat.type!=="channel"){ await tg("sendMessage",{chat_id:chatId,text:"That link is not a Telegram channel."}); return; }
+  const me=await tg("getMe");
+  const member=await tg("getChatMember",{chat_id:chat.id,user_id:me.id});
+  if(!["administrator","creator"].includes(member.status)){ await tg("sendMessage",{chat_id:chatId,text:"I am not an admin in that channel. Add this bot as an administrator, then run /registerchannel again."}); return; }
+  const id=String(chat.id);
+  if(!state.channels.includes(id)){ state.channels.push(id); saveState(); }
+  await tg("sendMessage",{chat_id:chatId,text:"Channel registered.\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically."});
+}
+
+function listingCaption(listing){
+  const username=listing.telegram_username?"@"+listing.telegram_username:"";
+  const about=String(listing.about||listing.description||"").trim();
+  const kiverUrl="https://getkiver.com/bot/"+listing.slug;
+  const telegramUrl=listing.telegram_url||(listing.telegram_username?"https://t.me/"+listing.telegram_username:"");
+  return ["🤖 "+String(listing.name||username||"Telegram Bot"),username,"",about,"","Discover on Kiver: "+kiverUrl,telegramUrl?"Open Bot: "+telegramUrl:""] .filter(Boolean).join("\n");
+}
+
+async function announceListing(listing){
+  const id=String(listing.id||"");
+  if(!id||state.announced.includes(id)||!state.channels.length) return;
+  const caption=listingCaption(listing);
+  const image=String(listing.image_url||"").trim();
+  for(const channelId of state.channels){
+    try{
+      if(image){ try{ await tg("sendPhoto",{chat_id:channelId,photo:image,caption:caption.slice(0,1024)}); } catch(_){ await tg("sendMessage",{chat_id:channelId,text:caption.slice(0,4096)}); } }
+      else await tg("sendMessage",{chat_id:channelId,text:caption.slice(0,4096)});
+    }catch(e){ console.error("Channel announcement failed for",channelId,e.message); }
+  }
+  state.announced.push(id); if(state.announced.length>1000) state.announced=state.announced.slice(-1000); saveState();
+}
+
+async function primeListings(){
+  try{ const rows=await kiver("list",{sort:"new",limit:60,offset:0}); for(const row of rows||[]) if(row?.id&&!state.announced.includes(String(row.id))) state.announced.push(String(row.id)); if(state.announced.length>1000) state.announced=state.announced.slice(-1000); saveState(); }catch(e){ console.error("Could not prime listing state:",e.message); }
+}
+
+let listingScanRunning=false;
+async function scanListings(){
+  if(listingScanRunning||!state.channels.length) return; listingScanRunning=true;
+  try{ const rows=await kiver("list",{sort:"new",limit:60,offset:0}); for(const row of (rows||[]).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at))) if(row?.id&&!state.announced.includes(String(row.id))) await announceListing(row); }catch(e){ console.error("Listing scan failed:",e.message); }finally{ listingScanRunning=false; }
 }
 
 async function processSubmission(chatId, link) {
@@ -153,15 +214,8 @@ async function processSubmission(chatId, link) {
   const publicUrl="https://getkiver.com/bot/"+slug;
   await tg("sendMessage",{chat_id:chatId,text:"Listed on Kiver.\n\n"+b.name+"\n"+publicUrl});
 
-  if(KIVER_CHANNEL_ID) {
-    const caption=b.name+"\n\n"+b.about+"\n\nView on Kiver: "+publicUrl+"\nOpen bot: "+b.telegramUrl;
-    if(b.imageUrl) {
-      try { await tg("sendPhoto",{chat_id:KIVER_CHANNEL_ID,photo:b.imageUrl,caption:caption.slice(0,1024)}); }
-      catch { await tg("sendMessage",{chat_id:KIVER_CHANNEL_ID,text:caption.slice(0,4096)}); }
-    } else {
-      await tg("sendMessage",{chat_id:KIVER_CHANNEL_ID,text:caption.slice(0,4096)});
-    }
-  }
+  await announceListing({...listing,...b,slug});
+
 }
 
 let running=false;
@@ -177,8 +231,15 @@ async function poll() {
         const msg=u.message;
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
         const text=msg.text.trim();
+        if(/^\/registerchannel(?:\s|$)/i.test(text)){
+          const inline=text.replace(/^\/registerchannel\s*/i,"").trim();
+          if(inline) await registerChannel(msg.chat.id,inline);
+          else await tg("sendMessage",{chat_id:msg.chat.id,text:"Paste the public Telegram channel link now.\n\nExample:\nhttps://t.me/yourchannel"});
+          continue;
+        }
+
         if(/^\/start(?:\s|$)/i.test(text)) {
-          await tg("sendMessage",{chat_id:msg.chat.id,text:"Send only the Telegram bot link.\n\nExample:\nhttps://t.me/examplebot"});
+          await tg("sendMessage",{chat_id:msg.chat.id,text:"Send only the Telegram bot link.\n\nExample:\nhttps://t.me/examplebot\n\nTo register a channel for automatic Kiver posts, use /registerchannel."});
           continue;
         }
         try {
@@ -196,4 +257,9 @@ async function poll() {
 http.createServer((req,res)=>{
   if(req.url==="/health"){res.writeHead(200,{"content-type":"text/plain"});return res.end("ok");}
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
-}).listen(PORT,()=>{console.log("Kiver Listing Bot listening on "+PORT);poll().catch(e=>console.error(e));});
+}).listen(PORT,()=>{
+  console.log("Kiver Listing Bot listening on "+PORT);
+  primeListings().then(()=>scanListings()).catch(e=>console.error(e));
+  poll().catch(e=>console.error(e));
+  setInterval(scanListings,60000);
+});
