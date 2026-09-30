@@ -145,12 +145,7 @@ async function registerChannel(chatId,link){
   try {
     const latestRows=await kiver("list",{sort:"new",limit:1,offset:0});
     const latest=latestRows?.[0];
-    if(latest?.id){
-      const caption=listingCaption(latest);
-      const image=String(latest.image_url||"").trim();
-      if(image){ try { await tg("sendPhoto",{chat_id:id,photo:image,caption:caption.slice(0,1024)}); } catch(_) { await tg("sendMessage",{chat_id:id,text:caption.slice(0,4096)}); } }
-      else await tg("sendMessage",{chat_id:id,text:caption.slice(0,4096)});
-    }
+    if(latest?.id) await sendListingAnnouncement(id,latest);
   } catch(e) { console.error("Could not announce latest listing to new channel:",e.message); }
 }
 
@@ -184,6 +179,28 @@ async function announceListing(listing){
     catch(e){ console.error("Channel announcement failed for",channelId,e.message); }
   }
   state.announced.push(id); if(state.announced.length>1000) state.announced=state.announced.slice(-1000); saveState();
+}
+
+async function primeListings(){
+  try{
+    const rows=await kiver("list",{sort:"new",limit:60,offset:0});
+    for(const row of rows||[]) if(row?.id&&!state.announced.includes(String(row.id))) state.announced.push(String(row.id));
+    if(state.announced.length>1000) state.announced=state.announced.slice(-1000);
+    saveState();
+  }catch(e){ console.error("Could not prime listing state:",e.message); }
+}
+
+let listingScanRunning=false;
+async function scanListings(){
+  if(listingScanRunning||!state.channels.length) return;
+  listingScanRunning=true;
+  try{
+    const rows=await kiver("list",{sort:"new",limit:60,offset:0});
+    for(const row of (rows||[]).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at))){
+      if(row?.id&&!state.announced.includes(String(row.id))) await announceListing(row);
+    }
+  }catch(e){ console.error("Listing scan failed:",e.message); }
+  finally{ listingScanRunning=false; }
 }
 
 async function processSubmission(chatId, link) {
