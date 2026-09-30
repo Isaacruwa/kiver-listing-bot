@@ -154,36 +154,36 @@ async function registerChannel(chatId,link){
   } catch(e) { console.error("Could not announce latest listing to new channel:",e.message); }
 }
 
-function listingCaption(listing){
-  const username=listing.telegram_username?"@"+listing.telegram_username:"";
+function listingMessage(listing){
+  const name=String(listing.name||"Telegram Bot").trim();
+  const username=listing.telegram_username?"@"+String(listing.telegram_username).trim():"";
   const about=String(listing.about||listing.description||"").trim();
   const kiverUrl="https://getkiver.com/bot/"+listing.slug;
-  const telegramUrl=listing.telegram_url||(listing.telegram_username?"https://t.me/"+listing.telegram_username:"");
-  return ["🤖 "+String(listing.name||username||"Telegram Bot"),username,"",about,"","Discover on Kiver: "+kiverUrl,telegramUrl?"Open Bot: "+telegramUrl:""] .filter(Boolean).join("\n");
+  const text=[name,username,about].filter(Boolean).join("\n\n");
+  return {text:text.slice(0,4096),kiverUrl};
+}
+
+async function sendListingAnnouncement(channelId,listing){
+  const {text,kiverUrl}=listingMessage(listing);
+  const image=String(listing.image_url||"").trim();
+  const replyMarkup={inline_keyboard:[[{text:"View on Kiver",url:kiverUrl}]]};
+  if(image){
+    try {
+      await tg("sendPhoto",{chat_id:channelId,photo:image,caption:text.slice(0,1024),reply_markup:replyMarkup});
+      return;
+    } catch(_) {}
+  }
+  await tg("sendMessage",{chat_id:channelId,text,reply_markup:replyMarkup});
 }
 
 async function announceListing(listing){
   const id=String(listing.id||"");
   if(!id||state.announced.includes(id)||!state.channels.length) return;
-  const caption=listingCaption(listing);
-  const image=String(listing.image_url||"").trim();
   for(const channelId of state.channels){
-    try{
-      if(image){ try{ await tg("sendPhoto",{chat_id:channelId,photo:image,caption:caption.slice(0,1024)}); } catch(_){ await tg("sendMessage",{chat_id:channelId,text:caption.slice(0,4096)}); } }
-      else await tg("sendMessage",{chat_id:channelId,text:caption.slice(0,4096)});
-    }catch(e){ console.error("Channel announcement failed for",channelId,e.message); }
+    try{ await sendListingAnnouncement(channelId,listing); }
+    catch(e){ console.error("Channel announcement failed for",channelId,e.message); }
   }
   state.announced.push(id); if(state.announced.length>1000) state.announced=state.announced.slice(-1000); saveState();
-}
-
-async function primeListings(){
-  try{ const rows=await kiver("list",{sort:"new",limit:60,offset:0}); for(const row of rows||[]) if(row?.id&&!state.announced.includes(String(row.id))) state.announced.push(String(row.id)); if(state.announced.length>1000) state.announced=state.announced.slice(-1000); saveState(); }catch(e){ console.error("Could not prime listing state:",e.message); }
-}
-
-let listingScanRunning=false;
-async function scanListings(){
-  if(listingScanRunning||!state.channels.length) return; listingScanRunning=true;
-  try{ const rows=await kiver("list",{sort:"new",limit:60,offset:0}); for(const row of (rows||[]).sort((a,b)=>new Date(a.created_at)-new Date(b.created_at))) if(row?.id&&!state.announced.includes(String(row.id))) await announceListing(row); }catch(e){ console.error("Listing scan failed:",e.message); }finally{ listingScanRunning=false; }
 }
 
 async function processSubmission(chatId, link) {
