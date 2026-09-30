@@ -221,11 +221,15 @@ async function poll() {
         if(/^\/registerchannel(?:\s|$)/i.test(text)){
           const inline=text.replace(/^\/registerchannel\s*/i,"").trim();
           if(inline) await registerChannel(msg.chat.id,inline);
-          else await tg("sendMessage",{chat_id:msg.chat.id,text:"Paste the public Telegram channel link now.\n\nExample:\nhttps://t.me/yourchannel"});
+          else {
+            pendingChannelRegistration.add(String(msg.chat.id));
+            await tg("sendMessage",{chat_id:msg.chat.id,text:"Paste the public Telegram channel link now.\n\nExample:\nhttps://t.me/yourchannel"});
+          }
           continue;
         }
 
         if(/^\/start(?:\s|$)/i.test(text)) {
+          pendingChannelRegistration.delete(String(msg.chat.id));
           await tg("sendMessage",{chat_id:msg.chat.id,text:"Send only the Telegram bot link.\n\nExample:\nhttps://t.me/examplebot\n\nTo register a channel for automatic Kiver posts, use /registerchannel."});
           continue;
         }
