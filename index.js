@@ -283,20 +283,22 @@ async function poll() {
 http.createServer(async (req,res)=>{
   if(req.url==="/health"){res.writeHead(200,{"content-type":"text/plain"});return res.end("ok");}
   if(req.url==="/admin/queue"){
-    if(!KIVER_ADMIN_KEY || req.headers["x-kiver-admin-key"]!==KIVER_ADMIN_KEY){res.writeHead(401,{"content-type":"application/json"});return res.end(JSON.stringify({error:"Unauthorized"}));}
+    const cors={"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":"https://getkiver.com","access-control-allow-methods":"GET,POST,OPTIONS","access-control-allow-headers":"content-type,x-kiver-admin-key"};
+    if(req.method==="OPTIONS"){res.writeHead(204,cors);return res.end();}
+    if(!KIVER_ADMIN_KEY || req.headers["x-kiver-admin-key"]!==KIVER_ADMIN_KEY){res.writeHead(401,cors);return res.end(JSON.stringify({error:"Unauthorized"}));}
     try{
       if(req.method==="GET"){
         const listings=await getPendingListings();
-        res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({listings}));
+        res.writeHead(200,cors);return res.end(JSON.stringify({listings}));
       }
       if(req.method==="POST"){
         let raw="";for await(const chunk of req)raw+=chunk;
         const body=JSON.parse(raw||"{}");
         const listing=await postPendingListing(String(body.listingId||""));
-        res.writeHead(200,{"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({ok:true,listing}));
+        res.writeHead(200,cors);return res.end(JSON.stringify({ok:true,listing}));
       }
-      res.writeHead(405,{"content-type":"application/json"});return res.end(JSON.stringify({error:"Method not allowed"}));
-    }catch(e){res.writeHead(400,{"content-type":"application/json","cache-control":"no-store"});return res.end(JSON.stringify({error:e.message||"Queue request failed"}));}
+      res.writeHead(405,cors);return res.end(JSON.stringify({error:"Method not allowed"}));
+    }catch(e){res.writeHead(400,cors);return res.end(JSON.stringify({error:e.message||"Queue request failed"}));}
   }
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
