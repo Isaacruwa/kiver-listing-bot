@@ -17,6 +17,7 @@ const DATA_DIR = process.env.KIVER_DATA_DIR || path.join(__dirname, "data");
 const STATE_FILE = path.join(DATA_DIR, "channel-state.json");
 function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[]}; } catch(_) { return {channels:[],announced:[]}; } }
 const state=loadState();
+const pendingChannelRegistration=new Set();
 function saveState(){ fs.mkdirSync(DATA_DIR,{recursive:true}); fs.writeFileSync(STATE_FILE,JSON.stringify(state,null,2)); }
 if(KIVER_CHANNEL_ID && !state.channels.includes(KIVER_CHANNEL_ID)){ state.channels.push(KIVER_CHANNEL_ID); saveState(); }
 
@@ -46,6 +47,7 @@ function parseLink(text) {
   if (!m) return null;
   const username = m[1].replace(/^@/,"");
   if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
+  if (!/bot$/i.test(username)) return null;
   return {username, url:"https://t.me/"+username};
 }
 
@@ -129,6 +131,7 @@ function passesFilters(b) {
 }
 
 async function registerChannel(chatId,link){
+  pendingChannelRegistration.delete(String(chatId));
   const ref=parseChannelLink(link);
   if(!ref){ await tg("sendMessage",{chat_id:chatId,text:"Send a public Telegram channel link, for example:\nhttps://t.me/yourchannel"}); return; }
   const chat=await tg("getChat",{chat_id:ref});
@@ -224,6 +227,17 @@ async function poll() {
 
         if(/^\/start(?:\s|$)/i.test(text)) {
           await tg("sendMessage",{chat_id:msg.chat.id,text:"Send only the Telegram bot link.\n\nExample:\nhttps://t.me/examplebot\n\nTo register a channel for automatic Kiver posts, use /registerchannel."});
+          continue;
+        }
+        if (pendingChannelRegistration.has(String(msg.chat.id))) {
+          try {
+            await registerChannel(msg.chat.id,text);
+          } catch(e) {
+            pendingChannelRegistration.delete(String(msg.chat.id));
+            await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't register that channel.
+
+"+(e.message||"Please send a public Telegram channel link.")});
+          }
           continue;
         }
         try {
