@@ -11,8 +11,8 @@ const KIVER_API_KEY = Buffer.from("c2JfcHVibGlzaGFibGVfTTd3TlNaUzlVd3lQcHRJZEVwa
 
 if (!TELEGRAM_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 
-const BOT_EMAIL = process.env.KIVER_AUTOMATION_EMAIL || "listing-bot@kiver.internal";
-const BOT_PASSWORD = process.env.KIVER_AUTOMATION_PASSWORD || crypto.createHash("sha256").update(TELEGRAM_TOKEN).digest("hex");
+const KIVER_AUTOMATION_SECRET = process.env.KIVER_AUTOMATION_SECRET;
+if (!KIVER_AUTOMATION_SECRET) throw new Error("KIVER_AUTOMATION_SECRET is required");
 const DATA_DIR = process.env.KIVER_DATA_DIR || path.join(__dirname, "data");
 const STATE_FILE = path.join(DATA_DIR, "channel-state.json");
 function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[]}; } catch(_) { return {channels:[],announced:[]}; } }
@@ -39,16 +39,6 @@ async function kiver(action, params={}, token=null) {
   const d = await r.json();
   if (!r.ok || !d.ok) throw new Error(d.error || "Kiver database request failed");
   return d.result;
-}
-
-async function kiverSession() {
-  try {
-    const x = await kiver("signup",{email:BOT_EMAIL,password:BOT_PASSWORD});
-    if (x?.token) return x.token;
-  } catch (_) {}
-  const x = await kiver("login",{email:BOT_EMAIL,password:BOT_PASSWORD});
-  if (!x?.token) throw new Error("Kiver automation account could not authenticate");
-  return x.token;
 }
 
 function parseLink(text) {
@@ -191,14 +181,8 @@ async function processSubmission(chatId, link) {
     return;
   }
 
-  const session=await kiverSession();
-  const existing=await kiver("byUser",{username:b.telegramUsername},session);
-  if(existing) {
-    await tg("sendMessage",{chat_id:chatId,text:"This Telegram bot is already listed on Kiver:\nhttps://getkiver.com/bot/"+existing.slug});
-    return;
-  }
-
-  const listing=await kiver("addBot",{
+  const listing=await kiver("automationAddBot",{
+    automationSecret:KIVER_AUTOMATION_SECRET,
     telegramUsername:b.telegramUsername,
     telegramUrl:b.telegramUrl,
     name:b.name,
@@ -208,7 +192,7 @@ async function processSubmission(chatId, link) {
     kind:"Bot",
     websiteUrl:"",
     category:"other"
-  },session);
+  });
 
   const slug=listing?.slug;
   const publicUrl="https://getkiver.com/bot/"+slug;
