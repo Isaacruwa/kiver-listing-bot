@@ -281,12 +281,24 @@ async function poll() {
   } finally { running=false; }
 }
 
+async function announceTestListingFromEnv(){
+  const testId=String(process.env.KIVER_TEST_LISTING_ID||"").trim();
+  if(!testId||!state.channels.length) return;
+  try{
+    const rows=await kiver("list",{sort:"new",limit:60,offset:0});
+    const listing=(rows||[]).find(row=>String(row?.id||"")===testId);
+    if(!listing) throw new Error("Test listing not found: "+testId);
+    for(const channelId of state.channels) await sendListingAnnouncement(channelId,listing);
+    console.log("Test listing announcement sent for listing "+testId);
+  }catch(e){ console.error("Test listing announcement failed:",e.message); }
+}
+
 http.createServer((req,res)=>{
   if(req.url==="/health"){res.writeHead(200,{"content-type":"text/plain"});return res.end("ok");}
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
-  primeListings().then(()=>scanListings()).catch(e=>console.error(e));
+  primeListings().then(()=>announceTestListingFromEnv()).then(()=>scanListings()).catch(e=>console.error(e));
   poll().catch(e=>console.error(e));
   setInterval(scanListings,60000);
 });
