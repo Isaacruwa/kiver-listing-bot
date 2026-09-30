@@ -286,7 +286,7 @@ http.createServer((req,res)=>{
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
-  primeListings().then(()=>announceTestListingFromEnv()).then(()=>scanListings()).catch(e=>console.error(e));
+  primeListings().then(()=>scanListings()).catch(e=>console.error(e));
   poll().catch(e=>console.error(e));
   setInterval(scanListings,60000);
 });
