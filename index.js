@@ -238,9 +238,7 @@ async function poll() {
             await registerChannel(msg.chat.id,text);
           } catch(e) {
             pendingChannelRegistration.delete(String(msg.chat.id));
-            await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't register that channel.
-
-"+(e.message||"Please send a public Telegram channel link.")});
+            await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't register that channel.\n\n"+(e.message||"Please send a public Telegram channel link.")});
           }
           continue;
         }
