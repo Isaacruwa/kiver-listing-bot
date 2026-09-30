@@ -142,6 +142,16 @@ async function registerChannel(chatId,link){
   const id=String(chat.id);
   if(!state.channels.includes(id)){ state.channels.push(id); saveState(); }
   await tg("sendMessage",{chat_id:chatId,text:"Channel registered.\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically."});
+  try {
+    const latestRows=await kiver("list",{sort:"new",limit:1,offset:0});
+    const latest=latestRows?.[0];
+    if(latest?.id){
+      const caption=listingCaption(latest);
+      const image=String(latest.image_url||"").trim();
+      if(image){ try { await tg("sendPhoto",{chat_id:id,photo:image,caption:caption.slice(0,1024)}); } catch(_) { await tg("sendMessage",{chat_id:id,text:caption.slice(0,4096)}); } }
+      else await tg("sendMessage",{chat_id:id,text:caption.slice(0,4096)});
+    }
+  } catch(e) { console.error("Could not announce latest listing to new channel:",e.message); }
 }
 
 function listingCaption(listing){
