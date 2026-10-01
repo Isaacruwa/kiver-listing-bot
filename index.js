@@ -5,7 +5,7 @@ const path = require("path");
 
 const PORT = Number(process.env.PORT || 10000);
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const KIVER_CHANNEL_ID = process.env.KIVER_CHANNEL_ID || "";
+const KIVER_CHANNEL_ID = process.env.KIVER_CHANNEL_ID || "@getkiver";
 const KIVER_DB_URL = "https://ovxytcfhyzqtxzhsmmhn.supabase.co/functions/v1/kiver-db";
 const KIVER_API_KEY = Buffer.from("c2JfcHVibGlzaGFibGVfTTd3TlNaUzlVd3lQcHRJZEVwaEwyZ19JTG1aT3JYaQ==","base64").toString();
 
@@ -155,7 +155,7 @@ function listingMessage(listing){
   const username=listing.telegram_username?"@"+String(listing.telegram_username).trim():"";
   const about=String(listing.about||listing.description||"").trim();
   const kiverUrl="https://getkiver.com/bot/"+listing.slug;
-  const text=[name,username,about].filter(Boolean).join("\n\n");
+  const text=[name,username,about?("About:\n"+about):"About:"].filter(Boolean).join("\n\n");
   return {text:text.slice(0,4096),kiverUrl};
 }
 
@@ -170,7 +170,7 @@ async function sendListingAnnouncement(channelId,listing){
   await tg("sendMessage",{chat_id:channelId,text,reply_markup:replyMarkup});
 }
 
-async function announceListing(listing){
+async function drainPendingAnnouncements(){\n  try {\n    const listings=await getPendingListings();\n    for(const listing of (listings||[])){\n      try { await announceListing(listing); } catch(e){ console.error("Pending announcement failed:",e.message); }\n    }\n  } catch(e){ console.error("Could not load pending announcements:",e.message); }\n}\n\nasync function announceListing(listing){
   const id=String(listing.id||"");
   if(!id||listing.channel_posted_at) return false;
   const channels=KIVER_CHANNEL_ID?[KIVER_CHANNEL_ID]:state.channels.slice();
@@ -319,5 +319,5 @@ http.createServer(async (req,res)=>{
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
-  poll().catch(e=>console.error(e));
+  drainPendingAnnouncements().catch(e=>console.error(e));\n  poll().catch(e=>console.error(e));
 });
