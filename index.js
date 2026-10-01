@@ -166,16 +166,33 @@ function listingImageUrl(listing){
     : "";
 }
 
+async function sendPhotoUpload(channelId,imageUrl,caption,replyMarkup){
+  const r=await fetch(imageUrl,{headers:{"user-agent":"Mozilla/5.0 KiverListingBot/1.0","accept":"image/*"}});
+  if(!r.ok) throw new Error("Kiver image fetch failed: HTTP "+r.status);
+  const type=r.headers.get("content-type")||"image/jpeg";
+  if(!type.startsWith("image/")) throw new Error("Kiver image endpoint did not return an image");
+  const bytes=await r.arrayBuffer();
+  const form=new FormData();
+  form.append("chat_id",String(channelId));
+  form.append("caption",caption);
+  form.append("reply_markup",JSON.stringify(replyMarkup));
+  form.append("photo",new Blob([bytes],{type}),"kiver-listing-image."+((type.split("/")[1]||"jpg").split(";")[0]));
+  const tgResponse=await fetch("https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/sendPhoto",{method:"POST",body:form});
+  const data=await tgResponse.json();
+  if(!tgResponse.ok || !data.ok) throw new Error(data.description||"Telegram photo upload failed");
+  return data.result;
+}
+
 async function sendListingAnnouncement(channelId,listing){
   const {text,kiverUrl}=listingMessage(listing);
   const image=listingImageUrl(listing);
   const replyMarkup={inline_keyboard:[[{text:"View on Kiver",url:kiverUrl}]]};
   if(image){
     try {
-      await tg("sendPhoto",{chat_id:channelId,photo:image,caption:text.slice(0,1024),reply_markup:replyMarkup});
+      await sendPhotoUpload(channelId,image,text.slice(0,1024),replyMarkup);
       return;
     } catch(e) {
-      console.error("Kiver image announcement failed; sending text:",e.message);
+      console.error("Kiver image upload failed; sending text:",e.message);
     }
   }
   await tg("sendMessage",{chat_id:channelId,text,reply_markup:replyMarkup});
