@@ -153,24 +153,47 @@ async function registerChannel(chatId,link){
 function listingMessage(listing){
   const name=String(listing.name||"Telegram Bot").trim();
   const username=listing.telegram_username?"@"+String(listing.telegram_username).trim():"";
-  const about=String(listing.about||listing.description||"").trim();
+  const about=String(listing.about||"").trim();
   const kiverUrl="https://getkiver.com/bot/"+listing.slug;
   const text=[name,username,about?("About:\n"+about):"About:"].filter(Boolean).join("\n\n");
   return {text:text.slice(0,4096),kiverUrl};
 }
 
+function listingImageUrl(listing){
+  const username=String(listing.telegram_username||"").trim();
+  return username
+    ? "https://getkiver.com/api/image?u="+encodeURIComponent(username)
+    : "";
+}
+
 async function sendListingAnnouncement(channelId,listing){
   const {text,kiverUrl}=listingMessage(listing);
-  const image=String(listing.image_url||"").trim();
+  const image=listingImageUrl(listing);
   const replyMarkup={inline_keyboard:[[{text:"View on Kiver",url:kiverUrl}]]};
   if(image){
-    await tg("sendPhoto",{chat_id:channelId,photo:image,caption:text.slice(0,1024),reply_markup:replyMarkup});
-    return;
+    try {
+      await tg("sendPhoto",{chat_id:channelId,photo:image,caption:text.slice(0,1024),reply_markup:replyMarkup});
+      return;
+    } catch(e) {
+      console.error("Kiver image announcement failed; sending text:",e.message);
+    }
   }
   await tg("sendMessage",{chat_id:channelId,text,reply_markup:replyMarkup});
 }
 
-async function drainPendingAnnouncements(){\n  try {\n    const listings=await getPendingListings();\n    for(const listing of (listings||[])){\n      try { await announceListing(listing); } catch(e){ console.error("Pending announcement failed:",e.message); }\n    }\n  } catch(e){ console.error("Could not load pending announcements:",e.message); }\n}\n\nasync function announceListing(listing){
+async function drainPendingAnnouncements(){
+  try {
+    const listings=await getPendingListings();
+    for(const listing of (listings||[])){
+      try { await announceListing(listing); }
+      catch(e){ console.error("Pending announcement failed:",e.message); }
+    }
+  } catch(e){
+    console.error("Could not load pending announcements:",e.message);
+  }
+}
+
+async function announceListing(listing){
   const id=String(listing.id||"");
   if(!id||listing.channel_posted_at) return false;
   const channels=KIVER_CHANNEL_ID?[KIVER_CHANNEL_ID]:state.channels.slice();
@@ -319,5 +342,6 @@ http.createServer(async (req,res)=>{
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
-  drainPendingAnnouncements().catch(e=>console.error(e));\n  poll().catch(e=>console.error(e));
+  drainPendingAnnouncements().catch(e=>console.error(e));
+  poll().catch(e=>console.error(e));
 });
