@@ -14,6 +14,9 @@ if (!TELEGRAM_TOKEN) throw new Error("TELEGRAM_BOT_TOKEN is required");
 const KIVER_AUTOMATION_SECRET = process.env.KIVER_AUTOMATION_SECRET;
 if (!KIVER_AUTOMATION_SECRET) throw new Error("KIVER_AUTOMATION_SECRET is required");
 const KIVER_ADMIN_KEY = process.env.KIVER_ADMIN_KEY || "";
+const ADMIN_WEBAPP_URL = process.env.KIVER_ADMIN_WEBAPP_URL || "https://kiver-listing-bot.onrender.com/miniapp";
+const pendingAdminAuth = new Set();
+const adminAuthed = new Set();
 const DATA_DIR = process.env.KIVER_DATA_DIR || path.join(__dirname, "data");
 const STATE_FILE = path.join(DATA_DIR, "channel-state.json");
 function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[]}; } catch(_) { return {channels:[],announced:[]}; } }
@@ -278,9 +281,10 @@ async function poll() {
   let offset=0;
   try {
     while(true) {
-      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message"]});
+      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query"]});
       for(const u of updates) {
         offset=Math.max(offset,u.update_id+1);
+        if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
         const msg=u.message;
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
         const text=msg.text.trim();
@@ -305,14 +309,15 @@ async function poll() {
         }
 
         if(text === "Admin Panel"){
-          await tg("sendMessage",{
-            chat_id:msg.chat.id,
-            text:"Admin Panel\n\nUse the controls below to manage the Kiver listing bot.",
-            reply_markup:{inline_keyboard:[
-              [{text:"Register Channel",callback_data:"admin_register_channel"}],
-              [{text:"Announcement Queue",callback_data:"admin_queue"}]
-            ]}
-          });
+          const chatKey=String(msg.chat.id);
+          if(adminAuthed.has(chatKey)) await sendAdminMenu(msg.chat.id);
+          else {pendingAdminAuth.add(chatKey);await tg("sendMessage",{chat_id:msg.chat.id,text:"Admin access required.\n\nSend the admin key to continue."});}
+          continue;
+        }
+        if(pendingAdminAuth.has(String(msg.chat.id))){
+          pendingAdminAuth.delete(String(msg.chat.id));
+          if(text===KIVER_ADMIN_KEY && KIVER_ADMIN_KEY){adminAuthed.add(String(msg.chat.id));await tg("sendMessage",{chat_id:msg.chat.id,text:"Admin access granted."});await sendAdminMenu(msg.chat.id)}
+          else await tg("sendMessage",{chat_id:msg.chat.id,text:"Invalid admin key.\n\nTap Admin Panel to try again."});
           continue;
         }
         if (pendingChannelRegistration.has(String(msg.chat.id))) {
@@ -336,8 +341,51 @@ async function poll() {
   } finally { running=false; }
 }
 
+const MINI_APP_HTML = fs.readFileSync(path.join(__dirname,"admin.html"),"utf8")
+
+async function adminApiAction(action,params={}){
+ switch(action){
+  case "auth": return {ok:true};
+  case "stats": return await kiver("automationAdminStats",{automationSecret:KIVER_AUTOMATION_SECRET});
+  case "listings": return await kiver("automationAdminListings",{automationSecret:KIVER_AUTOMATION_SECRET,q:String(params.q||""),limit:200});
+  case "users": return await kiver("automationAdminUsers",{automationSecret:KIVER_AUTOMATION_SECRET});
+  case "queue": return await getPendingListings();
+  case "feature": return await kiver("automationAdminFeature",{automationSecret:KIVER_AUTOMATION_SECRET,slug:String(params.slug||""),featured:!!params.featured});
+  case "status": return await kiver("automationAdminStatus",{automationSecret:KIVER_AUTOMATION_SECRET,slug:String(params.slug||""),status:String(params.status||"")});
+  case "announce": return await postPendingListing(String(params.listingId||""));
+  default: throw new Error("Unknown admin action.");
+ }
+}
+async function sendAdminMenu(chatId){
+ await tg("sendMessage",{chat_id:chatId,text:"Kiver Admin\n\nChoose an admin tool.",reply_markup:{inline_keyboard:[
+  [{text:"Dashboard / Stats",callback_data:"admin_stats"},{text:"Listings",callback_data:"admin_listings"}],
+  [{text:"Users",callback_data:"admin_users"},{text:"Announcement Queue",callback_data:"admin_queue"}],
+  [{text:"Commands",callback_data:"admin_commands"},{text:"Open Mini App",web_app:{url:ADMIN_WEBAPP_URL}}]
+ ]}});
+}
+async function handleAdminCallback(q){
+ const chatId=q.message?.chat?.id;if(!chatId)return;
+ if(!adminAuthed.has(String(chatId))){await tg("answerCallbackQuery",{callback_query_id:q.id,text:"Admin authentication required.",show_alert:true});return}
+ await tg("answerCallbackQuery",{callback_query_id:q.id});
+ try{
+  const data=String(q.data||"");
+  if(data==="admin_stats"){const s=await adminApiAction("stats");await tg("sendMessage",{chat_id:chatId,text:"KIVER STATS\n\nUsers: "+s.users+"\nListings: "+s.listings+"\nApproved: "+s.approved+"\nFeatured: "+s.featured+"\nVerified: "+s.verified+"\nUpvotes: "+s.upvotes+"\nReviews: "+s.reviews+"\nComments: "+s.comments+"\nNew users (7d): "+s.newUsers+"\nNew listings (7d): "+s.newListings+"\nPending announcements: "+s.pendingAnnouncements});return}
+  if(data==="admin_listings"){const rows=await adminApiAction("listings",{limit:20});await tg("sendMessage",{chat_id:chatId,text:"LISTINGS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")\n   "+x.status+" • "+(x.category||"other")+" • ↑"+(x.upvotes||0)+(x.featured?" • FEATURED":"")).join("\n\n")||"No listings.")});return}
+  if(data==="admin_users"){const rows=await adminApiAction("users");await tg("sendMessage",{chat_id:chatId,text:"USERS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.email+(x.is_admin?" [ADMIN]":"")).join("\n")||"No users.")});return}
+  if(data==="admin_queue"){const rows=await adminApiAction("queue");await tg("sendMessage",{chat_id:chatId,text:"ANNOUNCEMENT QUEUE\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")").join("\n")||"Queue is empty.")});return}
+  if(data==="admin_commands"){await tg("sendMessage",{chat_id:chatId,text:"ADMIN TOOLS\n\n/start — submission interface\n/registerchannel — announcement channel setup\nAdmin Panel — authenticated controls\nMini App — dashboard, listings, users, queue and controls\nAutomatic announcements — approved listings are posted to the configured Kiver channel"});return}
+ }catch(e){await tg("sendMessage",{chat_id:chatId,text:"Admin action failed.\n\n"+(e.message||"Please try again.")})}
+}
+
 http.createServer(async (req,res)=>{
   if(req.url==="/health"){res.writeHead(200,{"content-type":"text/plain"});return res.end("ok");}
+  if(req.url==="/miniapp"){res.writeHead(200,{"content-type":"text/html; charset=utf-8","cache-control":"no-store"});return res.end(MINI_APP_HTML);}
+  if(req.url==="/admin/api"){
+    const cors={"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":"*","access-control-allow-methods":"POST,OPTIONS","access-control-allow-headers":"content-type,x-kiver-admin-key"};
+    if(req.method==="OPTIONS"){res.writeHead(204,cors);return res.end();}
+    if(req.method!=="POST" || !KIVER_ADMIN_KEY || req.headers["x-kiver-admin-key"]!==KIVER_ADMIN_KEY){res.writeHead(401,cors);return res.end(JSON.stringify({error:"Unauthorized"}));}
+    try{let raw="";for await(const chunk of req)raw+=chunk;const body=JSON.parse(raw||"{}");const result=await adminApiAction(String(body.action||""),body.params||{});res.writeHead(200,cors);return res.end(JSON.stringify({ok:true,result}));}catch(e){res.writeHead(400,cors);return res.end(JSON.stringify({error:e.message||"Admin request failed"}));}
+  }
   if(req.url==="/admin/queue"){
     const cors={"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":"https://getkiver.com","access-control-allow-methods":"GET,POST,OPTIONS","access-control-allow-headers":"content-type,x-kiver-admin-key"};
     if(req.method==="OPTIONS"){res.writeHead(204,cors);return res.end();}
@@ -359,6 +407,7 @@ http.createServer(async (req,res)=>{
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
+  tg("setChatMenuButton",{menu_button:{type:"web_app",text:"Kiver Admin",web_app:{url:ADMIN_WEBAPP_URL}}}).catch(e=>console.error("Could not set Mini App menu button:",e.message));
   drainPendingAnnouncements().catch(e=>console.error(e));
   poll().catch(e=>console.error(e));
 });
