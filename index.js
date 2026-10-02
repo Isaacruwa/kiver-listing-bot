@@ -274,6 +274,7 @@ function cleanDescription(d){
   const t=String(d||"").replace(/[\u0000-\u001f\u007f]+/g," ").replace(/\s+/g," ").trim();
   return t.length>=60 && t.length<=1500 ? t : "";
 }
+const AI_MODELS=process.env.KIVER_AI_MODEL?[process.env.KIVER_AI_MODEL]:["google/gemma-4-26b-a4b-it:free","google/gemma-4-31b-it:free","openrouter/free"];
 async function aiEnrich(b){
   const key=process.env.OPENROUTER_API_KEY;
   if(!key) return null;
@@ -282,12 +283,12 @@ async function aiEnrich(b){
   const user="<bot>\nName: "+String(b.name||"").slice(0,200)+"\nAbout: "+String(b.about||b.description||"").slice(0,1500)+"\n</bot>";
   let lastErr=null;
   for(let attempt=1;attempt<=2;attempt++){
-    const ac=new AbortController(); const timer=setTimeout(()=>ac.abort(),15000);
+    const ac=new AbortController(); const timer=setTimeout(()=>ac.abort(),25000);
     try{
       const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{
         method:"POST",signal:ac.signal,
         headers:{"content-type":"application/json","authorization":"Bearer "+key,"http-referer":"https://www.getkiver.com","x-title":"Kiver Listing Bot"},
-        body:JSON.stringify({model:process.env.KIVER_AI_MODEL||"openrouter/free",max_tokens:2500,temperature:0.3,reasoning:{effort:"low",exclude:true},messages:[{role:"system",content:system},{role:"user",content:user}]})
+        body:JSON.stringify({model:AI_MODELS[0],models:AI_MODELS,max_tokens:2500,temperature:0.3,reasoning:{effort:"low",exclude:true},messages:[{role:"system",content:system},{role:"user",content:user}]})
       });
       const d=await r.json();
       if(!r.ok) throw new Error((d&&d.error&&d.error.message)||("HTTP "+r.status));
@@ -409,13 +410,15 @@ async function poll() {
           }
           continue;
         }
-        try {
-          await tg("sendMessage",{chat_id:msg.chat.id,text:"Checking the Telegram bot and preparing its Kiver listing..."});
-          await processSubmission(msg.chat.id,text);
-        } catch(e) {
-          console.error(e);
-          await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't create that listing.\n\n"+(e.message||"Please try another bot link.")});
-        }
+        (async()=>{
+          try {
+            await tg("sendMessage",{chat_id:msg.chat.id,text:"Checking the Telegram bot and preparing its Kiver listing..."});
+            await processSubmission(msg.chat.id,text);
+          } catch(e) {
+            console.error(e);
+            try{ await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't create that listing.\n\n"+(e.message||"Please try another bot link.")}); }catch(_){}
+          }
+        })();
       }
     }
   } finally { running=false; }
