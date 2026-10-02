@@ -19,7 +19,7 @@ const pendingAdminAuth = new Set();
 const adminAuthed = new Set();
 const DATA_DIR = process.env.KIVER_DATA_DIR || path.join(__dirname, "data");
 const STATE_FILE = path.join(DATA_DIR, "channel-state.json");
-function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[]}; } catch(_) { return {channels:[],announced:[]}; } }
+function loadState(){ try { const x=JSON.parse(fs.readFileSync(STATE_FILE,"utf8")); return {channels:Array.isArray(x.channels)?x.channels:[],announced:Array.isArray(x.announced)?x.announced:[],expiry:Array.isArray(x.expiry)?x.expiry:[]}; } catch(_) { return {channels:[],announced:[],expiry:[]}; } }
 const state=loadState();
 const pendingChannelRegistration=new Set();
 function saveState(){ fs.mkdirSync(DATA_DIR,{recursive:true}); fs.writeFileSync(STATE_FILE,JSON.stringify(state,null,2)); }
@@ -34,6 +34,41 @@ async function tg(method, body={}) {
   if (!d.ok) throw new Error(d.description || "Telegram API error");
   return d.result;
 }
+
+
+// ---- Self-destructing chat messages -------------------------------------
+// Conversation messages (both the user's and the bot's) are deleted after a delay to keep the chat clean.
+// Only the /start command and the bot's welcome reply are permanent. Channel announcements are never touched.
+const MSG_TTL_MS=Math.max(5,Number(process.env.KIVER_MSG_TTL_SECONDS||90))*1000;          // normal chat: 1.5 min
+const ADMIN_TTL_MS=Math.max(5,Number(process.env.KIVER_ADMIN_MSG_TTL_SECONDS||150))*1000;  // admin panel: 2.5 min
+function expireAt(chatId,ids,ms){
+  const at=Date.now()+ms;
+  for(const m of [].concat(ids)) if(m) state.expiry.push({c:chatId,m,at});
+  saveState();
+}
+// Sends a message and schedules it for deletion. opts: {ttl, keep, collect:[...], extra:{...}}
+async function reply(chatId,text,opts={}){
+  const m=await tg("sendMessage",{chat_id:chatId,text,...(opts.extra||{})});
+  if(opts.keep) return m;
+  if(opts.collect) opts.collect.push(m.message_id); else expireAt(chatId,m.message_id,opts.ttl||MSG_TTL_MS);
+  return m;
+}
+let sweeping=false;
+async function sweepExpired(){
+  if(sweeping||!state.expiry.length) return;
+  sweeping=true;
+  try{
+    const now=Date.now(), due=state.expiry.filter(x=>x.at<=now);
+    if(!due.length) return;
+    state.expiry=state.expiry.filter(x=>x.at>now); saveState();
+    for(const x of due){
+      try{ await tg("deleteMessage",{chat_id:x.c,message_id:x.m}); }
+      catch(e){ if(/too many requests|retry after|fetch failed|timed? ?out|econn/i.test(String(e.message))) state.expiry.push({...x,at:Date.now()+15000}); } // already gone / not deletable: drop it
+    }
+    saveState();
+  } finally { sweeping=false; }
+}
+setInterval(()=>sweepExpired().catch(e=>console.error("Message cleanup failed:",e.message)),2000);
 
 async function kiver(action, params={}, token=null) {
   const r = await fetch(KIVER_DB_URL, {
@@ -142,15 +177,15 @@ function passesFilters(b) {
 async function registerChannel(chatId,link){
   pendingChannelRegistration.delete(String(chatId));
   const ref=parseChannelLink(link);
-  if(!ref){ await tg("sendMessage",{chat_id:chatId,text:"Send a public Telegram channel link, for example:\nhttps://t.me/yourchannel"}); return; }
+  if(!ref){ await reply(chatId,"Send a public Telegram channel link, for example:\nhttps://t.me/yourchannel",{ttl:ADMIN_TTL_MS}); return; }
   const chat=await tg("getChat",{chat_id:ref});
-  if(chat.type!=="channel"){ await tg("sendMessage",{chat_id:chatId,text:"That link is not a Telegram channel."}); return; }
+  if(chat.type!=="channel"){ await reply(chatId,"That link is not a Telegram channel.",{ttl:ADMIN_TTL_MS}); return; }
   const me=await tg("getMe");
   const member=await tg("getChatMember",{chat_id:chat.id,user_id:me.id});
-  if(!["administrator","creator"].includes(member.status)){ await tg("sendMessage",{chat_id:chatId,text:"I am not an admin in that channel. Add this bot as an administrator, then run /registerchannel again."}); return; }
+  if(!["administrator","creator"].includes(member.status)){ await reply(chatId,"I am not an admin in that channel. Add this bot as an administrator, then run /registerchannel again.",{ttl:ADMIN_TTL_MS}); return; }
   const id=String(chat.id);
   if(!state.channels.includes(id)){ state.channels.push(id); saveState(); }
-  await tg("sendMessage",{chat_id:chatId,text:"Channel registered.\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically."});
+  await reply(chatId,"Channel registered.\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically.",{ttl:ADMIN_TTL_MS});
   try {
     const latestRows=await kiver("list",{sort:"new",limit:1,offset:0});
     const latest=latestRows?.[0];
@@ -314,11 +349,11 @@ async function enrichListing(b){
   return {category,description};
 }
 
-async function processSubmission(chatId, link) {
+async function processSubmission(chatId, link, ids) {
   const b=await inspectTelegramBot(link);
   const rejection=passesFilters(b);
   if(rejection) {
-    await tg("sendMessage",{chat_id:chatId,text:"Not eligible for Kiver.\n\n"+rejection});
+    await reply(chatId,"Not eligible for Kiver.\n\n"+rejection,{collect:ids});
     return;
   }
 
@@ -349,7 +384,7 @@ async function processSubmission(chatId, link) {
 
   const slug=listing?.slug;
   const publicUrl="https://getkiver.com/bot/"+slug;
-  await tg("sendMessage",{chat_id:chatId,text:"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl});
+  await reply(chatId,"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl,{collect:ids});
 
   await announceListing({...listing,...b,slug});
 
@@ -368,56 +403,59 @@ async function poll() {
         if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
         const msg=u.message;
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
-        const text=msg.text.trim();
+        const text=msg.text.trim(), cid=msg.chat.id, key=String(cid);
         if(/^\/registerchannel(?:\s|$)/i.test(text)){
+          expireAt(cid,msg.message_id,ADMIN_TTL_MS);
           const inline=text.replace(/^\/registerchannel\s*/i,"").trim();
-          if(inline) await registerChannel(msg.chat.id,inline);
+          if(inline) await registerChannel(cid,inline);
           else {
-            pendingChannelRegistration.add(String(msg.chat.id));
-            await tg("sendMessage",{chat_id:msg.chat.id,text:"Paste the public Telegram channel link now.\n\nExample:\nhttps://t.me/yourchannel"});
+            pendingChannelRegistration.add(key);
+            await reply(cid,"Paste the public Telegram channel link now.\n\nExample:\nhttps://t.me/yourchannel",{ttl:ADMIN_TTL_MS});
           }
           continue;
         }
 
         if(/^\/start(?:\s|$)/i.test(text)) {
-          pendingChannelRegistration.delete(String(msg.chat.id));
-          await tg("sendMessage",{
-            chat_id:msg.chat.id,
-            text:"Send only the Telegram bot link.\n\nE.x : https://t.me/getkiverbot",
-            reply_markup:{keyboard:[[{text:"Admin Panel"}]],resize_keyboard:true}
-          });
+          // The /start command and this welcome reply are the only permanent messages in the chat.
+          pendingChannelRegistration.delete(key);
+          await reply(cid,"Send only the Telegram bot link.\n\nE.x : https://t.me/getkiverbot",{keep:true,extra:{reply_markup:{keyboard:[[{text:"Admin Panel"}]],resize_keyboard:true}}});
           continue;
         }
 
         if(text === "Admin Panel"){
-          const chatKey=String(msg.chat.id);
-          if(adminAuthed.has(chatKey)) await sendAdminMenu(msg.chat.id);
-          else {pendingAdminAuth.add(chatKey);await tg("sendMessage",{chat_id:msg.chat.id,text:"Admin access required.\n\nSend the admin key to continue."});}
+          expireAt(cid,msg.message_id,ADMIN_TTL_MS);
+          if(adminAuthed.has(key)) await sendAdminMenu(cid);
+          else {pendingAdminAuth.add(key);await reply(cid,"Admin access required.\n\nSend the admin key to continue.",{ttl:ADMIN_TTL_MS});}
           continue;
         }
-        if(pendingAdminAuth.has(String(msg.chat.id))){
-          pendingAdminAuth.delete(String(msg.chat.id));
-          if(text===KIVER_ADMIN_KEY && KIVER_ADMIN_KEY){adminAuthed.add(String(msg.chat.id));await tg("sendMessage",{chat_id:msg.chat.id,text:"Admin access granted."});await sendAdminMenu(msg.chat.id)}
-          else await tg("sendMessage",{chat_id:msg.chat.id,text:"Invalid admin key.\n\nTap Admin Panel to try again."});
+        if(pendingAdminAuth.has(key)){
+          pendingAdminAuth.delete(key);
+          // The admin key is a secret: remove the message that contains it straight away.
+          try{ await tg("deleteMessage",{chat_id:cid,message_id:msg.message_id}); }catch(_){ expireAt(cid,msg.message_id,5000); }
+          if(text===KIVER_ADMIN_KEY && KIVER_ADMIN_KEY){adminAuthed.add(key);await reply(cid,"Admin access granted.",{ttl:ADMIN_TTL_MS});await sendAdminMenu(cid)}
+          else await reply(cid,"Invalid admin key.\n\nTap Admin Panel to try again.",{ttl:ADMIN_TTL_MS});
           continue;
         }
-        if (pendingChannelRegistration.has(String(msg.chat.id))) {
+        if (pendingChannelRegistration.has(key)) {
+          expireAt(cid,msg.message_id,ADMIN_TTL_MS);
           try {
-            await registerChannel(msg.chat.id,text);
+            await registerChannel(cid,text);
           } catch(e) {
-            pendingChannelRegistration.delete(String(msg.chat.id));
-            await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't register that channel.\n\n"+(e.message||"Please send a public Telegram channel link.")});
+            pendingChannelRegistration.delete(key);
+            await reply(cid,"I couldn't register that channel.\n\n"+(e.message||"Please send a public Telegram channel link."),{ttl:ADMIN_TTL_MS});
           }
           continue;
         }
         (async()=>{
+          // Link submission: the link, the progress note and the result all disappear together, MSG_TTL after the outcome.
+          const ids=[msg.message_id];
           try {
-            await tg("sendMessage",{chat_id:msg.chat.id,text:"Checking the Telegram bot and preparing its Kiver listing..."});
-            await processSubmission(msg.chat.id,text);
+            await reply(cid,"Checking the Telegram bot and preparing its Kiver listing...",{collect:ids});
+            await processSubmission(cid,text,ids);
           } catch(e) {
             console.error(e);
-            try{ await tg("sendMessage",{chat_id:msg.chat.id,text:"I couldn't create that listing.\n\n"+(e.message||"Please try another bot link.")}); }catch(_){}
-          }
+            try{ await reply(cid,"I couldn't create that listing.\n\n"+(e.message||"Please try another bot link."),{collect:ids}); }catch(_){}
+          } finally { expireAt(cid,ids,MSG_TTL_MS); }
         })();
       }
     }
@@ -440,11 +478,11 @@ async function adminApiAction(action,params={}){
  }
 }
 async function sendAdminMenu(chatId){
- await tg("sendMessage",{chat_id:chatId,text:"Kiver Admin\n\nChoose an admin tool.",reply_markup:{inline_keyboard:[
+ await reply(chatId,"Kiver Admin\n\nChoose an admin tool.",{ttl:ADMIN_TTL_MS,extra:{reply_markup:{inline_keyboard:[
   [{text:"Dashboard / Stats",callback_data:"admin_stats"},{text:"Listings",callback_data:"admin_listings"}],
   [{text:"Users",callback_data:"admin_users"},{text:"Announcement Queue",callback_data:"admin_queue"}],
   [{text:"Commands",callback_data:"admin_commands"},{text:"Open Mini App",web_app:{url:ADMIN_WEBAPP_URL}}]
- ]}});
+ ]}}});
 }
 async function handleAdminCallback(q){
  const chatId=q.message?.chat?.id;if(!chatId)return;
@@ -452,12 +490,12 @@ async function handleAdminCallback(q){
  await tg("answerCallbackQuery",{callback_query_id:q.id});
  try{
   const data=String(q.data||"");
-  if(data==="admin_stats"){const s=await adminApiAction("stats");await tg("sendMessage",{chat_id:chatId,text:"KIVER STATS\n\nUsers: "+s.users+"\nListings: "+s.listings+"\nApproved: "+s.approved+"\nFeatured: "+s.featured+"\nVerified: "+s.verified+"\nUpvotes: "+s.upvotes+"\nReviews: "+s.reviews+"\nComments: "+s.comments+"\nNew users (7d): "+s.newUsers+"\nNew listings (7d): "+s.newListings+"\nPending announcements: "+s.pendingAnnouncements});return}
-  if(data==="admin_listings"){const rows=await adminApiAction("listings",{limit:20});await tg("sendMessage",{chat_id:chatId,text:"LISTINGS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")\n   "+x.status+" • "+(x.category||"other")+" • ↑"+(x.upvotes||0)+(x.featured?" • FEATURED":"")).join("\n\n")||"No listings.")});return}
-  if(data==="admin_users"){const rows=await adminApiAction("users");await tg("sendMessage",{chat_id:chatId,text:"USERS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.email+(x.is_admin?" [ADMIN]":"")).join("\n")||"No users.")});return}
-  if(data==="admin_queue"){const rows=await adminApiAction("queue");await tg("sendMessage",{chat_id:chatId,text:"ANNOUNCEMENT QUEUE\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")").join("\n")||"Queue is empty.")});return}
-  if(data==="admin_commands"){await tg("sendMessage",{chat_id:chatId,text:"ADMIN TOOLS\n\n/start — submission interface\n/registerchannel — announcement channel setup\nAdmin Panel — authenticated controls\nMini App — dashboard, listings, users, queue and controls\nAutomatic announcements — approved listings are posted to the configured Kiver channel"});return}
- }catch(e){await tg("sendMessage",{chat_id:chatId,text:"Admin action failed.\n\n"+(e.message||"Please try again.")})}
+  if(data==="admin_stats"){const s=await adminApiAction("stats");await reply(chatId,"KIVER STATS\n\nUsers: "+s.users+"\nListings: "+s.listings+"\nApproved: "+s.approved+"\nFeatured: "+s.featured+"\nVerified: "+s.verified+"\nUpvotes: "+s.upvotes+"\nReviews: "+s.reviews+"\nComments: "+s.comments+"\nNew users (7d): "+s.newUsers+"\nNew listings (7d): "+s.newListings+"\nPending announcements: "+s.pendingAnnouncements,{ttl:ADMIN_TTL_MS});return}
+  if(data==="admin_listings"){const rows=await adminApiAction("listings",{limit:20});await reply(chatId,"LISTINGS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")\n   "+x.status+" • "+(x.category||"other")+" • ↑"+(x.upvotes||0)+(x.featured?" • FEATURED":"")).join("\n\n")||"No listings."),{ttl:ADMIN_TTL_MS});return}
+  if(data==="admin_users"){const rows=await adminApiAction("users");await reply(chatId,"USERS\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.email+(x.is_admin?" [ADMIN]":"")).join("\n")||"No users."),{ttl:ADMIN_TTL_MS});return}
+  if(data==="admin_queue"){const rows=await adminApiAction("queue");await reply(chatId,"ANNOUNCEMENT QUEUE\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")").join("\n")||"Queue is empty."),{ttl:ADMIN_TTL_MS});return}
+  if(data==="admin_commands"){await reply(chatId,"ADMIN TOOLS\n\n/start — submission interface\n/registerchannel — announcement channel setup\nAdmin Panel — authenticated controls\nMini App — dashboard, listings, users, queue and controls\nAutomatic announcements — approved listings are posted to the configured Kiver channel",{ttl:ADMIN_TTL_MS});return}
+ }catch(e){await reply(chatId,"Admin action failed.\n\n"+(e.message||"Please try again."),{ttl:ADMIN_TTL_MS})}
 }
 
 http.createServer(async (req,res)=>{
