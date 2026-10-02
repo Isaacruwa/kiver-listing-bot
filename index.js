@@ -101,15 +101,15 @@ function decode(s) {
   return String(s||"")
     .replace(/&amp;/gi,"&").replace(/&quot;/gi,'"').replace(/&#39;/gi,"'")
     .replace(/&lt;/gi,"<").replace(/&gt;/gi,">")
-    .replace(/&#x([0-9a-f]+);/gi,(_,x)=>String.fromCharCode(parseInt(x,16)))
-    .replace(/&#(\d+);/g,(_,x)=>String.fromCharCode(Number(x)));
+    .replace(/&#x([0-9a-f]+);/gi,(_,x)=>String.fromCodePoint(parseInt(x,16)))
+    .replace(/&#(\d+);/g,(_,x)=>String.fromCodePoint(Number(x)));
 }
 
 function meta(html) {
   const out={};
   for (const tag of html.match(/<meta\b[^>]*>/gi)||[]) {
     const a={}; let m;
-    const re=/([\w:-]+)\s*=\s*(["'])(.*?)\2/gi;
+    const re=/([\w:-]+)\s*=\s*(["'])([\s\S]*?)\2/gi;
     while((m=re.exec(tag))) a[m[1].toLowerCase()]=decode(m[3]);
     const key=(a.property||a.name||a.itemprop||"").toLowerCase();
     if(key && !out[key] && a.content) out[key]=a.content;
@@ -138,8 +138,8 @@ async function inspectTelegramBot(link) {
   if(isChannelOrGroup) throw new Error("That link is a channel or group, not a bot. Send a link to a bot.");
   if(!isBot) throw new Error("That link does not look like a Telegram bot. Send a link to a bot.");
   const title=(m["og:title"]||m["twitter:title"]||"").replace(/\s*\|\s*Telegram.*$/i,"").replace(/^Telegram:\s*/i,"").trim();
-  const about=(m["og:description"]||m["twitter:description"]||m.description||"").replace(/^Telegram:\s*/i,"").trim();
   const description=pageDescription(html);
+  const about=(m["og:description"]||m["twitter:description"]||m.description||"").replace(/^Telegram:\s*/i,"").trim()||description;
   const imageUrl=m["og:image"]||m["twitter:image"]||m["twitter:image:src"]||"";
 
   return {
