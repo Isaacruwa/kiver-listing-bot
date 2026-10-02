@@ -133,7 +133,7 @@ function passesFilters(b) {
   const username=String(b.telegramUsername||"").trim();
   if(!name) return "Bot name is missing.";
   if(!b.imageUrl) return "A profile photo is required.";
-  if(about.length < 40) return "The Telegram About section is too short.";
+  if(about.length < 35) return "The Telegram About section is too short.";
   const hay=[name,username,about].join("\n");
   if(BLOCKED.some(re=>re.test(hay))) return "This bot does not meet Kiver listing requirements.";
   return null;
