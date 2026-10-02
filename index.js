@@ -329,7 +329,7 @@ async function processSubmission(chatId, link) {
     telegramUrl:b.telegramUrl,
     name:b.name,
     about:b.about,
-    description:enriched.description || b.description || b.about,
+    description:enriched.description || "",
     imageUrl:b.imageUrl,
     kind:"Bot",
     websiteUrl:"",
