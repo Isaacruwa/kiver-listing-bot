@@ -50,8 +50,7 @@ function parseLink(text) {
   const m = String(text||"").trim().match(/https?:\/\/(?:www\.)?(?:t\.me|telegram\.me)\/([^\s/?#]+)/i);
   if (!m) return null;
   const username = m[1].replace(/^@/,"");
-  if (!/^[A-Za-z0-9_]{5,32}$/.test(username)) return null;
-  if (!/bot$/i.test(username)) return null;
+  if (!/^[A-Za-z0-9_]{4,32}$/.test(username)) return null;
   return {username, url:"https://t.me/"+username};
 }
 
@@ -93,10 +92,16 @@ async function inspectTelegramBot(link) {
   const p=parseLink(link);
   if(!p) throw new Error("Send a direct Telegram bot link such as https://t.me/examplebot");
 
-  const r=await fetch(p.url,{headers:{"user-agent":"Mozilla/5.0 KiverListingBot/1.0","accept":"text/html,application/xhtml+xml"}});
+  const r=await fetch(p.url,{headers:{"user-agent":"Mozilla/5.0 KiverListingBot/1.0","accept":"text/html,application/xhtml+xml","accept-language":"en-US,en;q=0.9"}});
   if(!r.ok) throw new Error("Telegram link could not be reached");
 
   const html=await r.text(), m=meta(html);
+  const btn=((html.match(/<a[^>]+class=["'][^"']*tgme_action_button_new[^"']*["'][^>]*>([\s\S]*?)<\/a>/i)||[])[1]||"").replace(/<[^>]+>/g," ").replace(/\s+/g," ").trim();
+  const extra=decode(((html.match(/<div[^>]+class=["'][^"']*tgme_page_extra[^"']*["'][^>]*>([\s\S]*?)<\/div>/i)||[])[1]||"").replace(/<[^>]+>/g," ")).replace(/\s+/g," ").trim();
+  const isChannelOrGroup=/\b(subscribers?|members?|online)\b/i.test(extra) || /^(view in telegram|join |preview channel)/i.test(btn);
+  const isBot=/start bot/i.test(btn) || (/^@/.test(extra) && /bot$/i.test(p.username));
+  if(isChannelOrGroup) throw new Error("That link is a channel or group, not a bot. Send a link to a bot.");
+  if(!isBot) throw new Error("That link does not look like a Telegram bot. Send a link to a bot.");
   const title=(m["og:title"]||m["twitter:title"]||"").replace(/\s*\|\s*Telegram.*$/i,"").replace(/^Telegram:\s*/i,"").trim();
   const about=(m["og:description"]||m["twitter:description"]||m.description||"").replace(/^Telegram:\s*/i,"").trim();
   const description=pageDescription(html);
