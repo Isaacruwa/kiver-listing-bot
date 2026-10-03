@@ -534,7 +534,7 @@ http.createServer(async (req,res)=>{
   res.writeHead(200,{"content-type":"text/plain"});res.end("Kiver Listing Bot");
 }).listen(PORT,()=>{
   console.log("Kiver Listing Bot listening on "+PORT);
-  tg("setChatMenuButton",{menu_button:{type:"web_app",text:"DISCOVER",web_app:{url:"https://www.getkiver.com"}}}).catch(e=>console.error("Could not set Mini App menu button:",e.message));
+  tg("setChatMenuButton",{menu_button:{type:"web_app",text:"DISCOVER",web_app:{url:"https://www.getkiver.com/miniapp.html"}}}).catch(e=>console.error("Could not set Mini App menu button:",e.message));
   drainPendingAnnouncements().catch(e=>console.error(e));
   poll().catch(e=>console.error(e));
 });
