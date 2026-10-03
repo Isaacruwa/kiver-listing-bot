@@ -70,6 +70,10 @@ async function sweepExpired(){
 }
 setInterval(()=>sweepExpired().catch(e=>console.error("Message cleanup failed:",e.message)),2000);
 
+// Maker health & growth (alerts and weekly report for the person who listed a bot). Off unless KIVER_MAKER_DB_URL is set.
+const makers=require("./lib/makers")({tg,kiver,reply,expireAt,msgTtlMs:MSG_TTL_MS,isAdminSession:id=>adminAuthed.has(String(id))});
+makers.start().catch(e=>console.error("Maker health failed to start:",e.message));
+
 async function kiver(action, params={}, token=null) {
   const r = await fetch(KIVER_DB_URL, {
     method:"POST",
@@ -384,7 +388,8 @@ async function processSubmission(chatId, link, ids) {
 
   const slug=listing?.slug;
   const publicUrl="https://getkiver.com/bot/"+slug;
-  await reply(chatId,"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl,{collect:ids});
+  const tracked=await makers.enroll({chatId,slug,username:b.telegramUsername,name:b.name});
+  await reply(chatId,"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl+(tracked?"\n\nHealth alerts are on for this bot. Send /mybots to see it or /alerts off to stop.":""),{collect:ids});
 
   await announceListing({...listing,...b,slug});
 
@@ -432,7 +437,7 @@ async function poll() {
           pendingAdminAuth.delete(key);
           // The admin key is a secret: remove the message that contains it straight away.
           try{ await tg("deleteMessage",{chat_id:cid,message_id:msg.message_id}); }catch(_){ expireAt(cid,msg.message_id,5000); }
-          if(text===KIVER_ADMIN_KEY && KIVER_ADMIN_KEY){adminAuthed.add(key);await reply(cid,"Admin access granted.",{ttl:ADMIN_TTL_MS});await sendAdminMenu(cid)}
+          if(text===KIVER_ADMIN_KEY && KIVER_ADMIN_KEY){adminAuthed.add(key);makers.markAdmin(cid);await reply(cid,"Admin access granted.",{ttl:ADMIN_TTL_MS});await sendAdminMenu(cid)}
           else await reply(cid,"Invalid admin key.\n\nTap Admin Panel to try again.",{ttl:ADMIN_TTL_MS});
           continue;
         }
@@ -446,6 +451,7 @@ async function poll() {
           }
           continue;
         }
+        if(await makers.command(cid,text,msg)) continue;
         (async()=>{
           // Link submission: the link, the progress note and the result all disappear together, MSG_TTL after the outcome.
           const ids=[msg.message_id];

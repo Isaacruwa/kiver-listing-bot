@@ -23,3 +23,16 @@ To keep the private chat clean, every conversation message is deleted automatica
 - **Never deleted:** the `/start` command, the bot's welcome reply, and channel announcements.
 
 Pending deletions are saved to `KIVER_DATA_DIR`, so they survive a restart as long as that directory is persistent.
+
+
+## Maker health and growth
+
+The person who lists a bot from the chat gets:
+
+- an alert if the bot's public Telegram page disappears (deleted, banned or renamed) and another when it returns
+- a weekly report with Kiver upvotes and Telegram monthly users, with changes since the last report
+- `/mybots` to see their bots and `/alerts on|off` to control the messages
+
+Admin chats are never tracked: bots an admin lists create no alerts or data. An admin chat is remembered once it has entered the admin key.
+
+Data is stored in Postgres (`KIVER_MAKER_DB_URL`, tables `mh_*`, created automatically). If the variable is missing the feature stays off and everything else works as before. Tuning: `KIVER_HEALTH_INTERVAL_MIN` (default 20), `KIVER_DIGEST_DAYS` (default 7).
