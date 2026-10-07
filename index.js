@@ -365,6 +365,33 @@ async function enrichListing(b){
   return {category,description};
 }
 
+const DESCRIBE_URL="https://ovxytcfhyzqtxzhsmmhn.supabase.co/functions/v1/kiver-describe";
+async function describeCall(action,params={}){
+  const r=await fetch(DESCRIBE_URL,{method:"POST",headers:{"content-type":"application/json","apikey":KIVER_API_KEY},body:JSON.stringify({action,params:{...params,automationSecret:KIVER_AUTOMATION_SECRET}})});
+  const d=await r.json().catch(()=>({}));
+  if(!r.ok||!d.ok) throw new Error(d.error||("HTTP "+r.status));
+  return d.result;
+}
+// Listings saved without a description (free AI models were busy) are retried in the background and filled in later.
+const describeTries=new Map(); let describeBusy=false;
+async function retryMissingDescriptions(){
+  if(describeBusy||!process.env.OPENROUTER_API_KEY||!KIVER_AUTOMATION_SECRET) return;
+  describeBusy=true;
+  try{
+    const rows=await describeCall("missing");
+    for(const row of rows.slice(0,3)){
+      const n=describeTries.get(row.slug)||0; if(n>=8) continue;
+      describeTries.set(row.slug,n+1);
+      try{
+        const ai=await aiEnrich({name:row.name,about:row.about});
+        if(ai&&ai.description){ const out=await describeCall("set",{slug:row.slug,description:ai.description,category:ai.category}); console.log("Description added later for",row.slug,JSON.stringify(out)); }
+      }catch(e){ console.error("Retry description failed for",row.slug+" (try "+(n+1)+"):",e.message); }
+    }
+  }catch(e){ console.error("Description retry check failed:",e.message); }
+  finally{ describeBusy=false; }
+}
+setTimeout(()=>{retryMissingDescriptions();setInterval(retryMissingDescriptions,4*60*1000)},90*1000);
+
 async function processSubmission(chatId, link, ids) {
   const b=await inspectTelegramBot(link);
   const rejection=passesFilters(b);
