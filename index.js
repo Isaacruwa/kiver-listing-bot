@@ -321,7 +321,10 @@ async function aiCall(model,key,system,user,signal){
     body:JSON.stringify({model,max_tokens:3500,temperature:0.3,reasoning:{effort:"low",exclude:true},messages:[{role:"system",content:system},{role:"user",content:user}]})
   });
   const d=await r.json();
-  if(!r.ok) throw new Error(model+": "+((d&&d.error&&d.error.message)||("HTTP "+r.status)));
+  if(!r.ok){
+    const raw=d&&d.error&&d.error.metadata&&(d.error.metadata.raw||d.error.metadata.provider_name);
+    throw new Error(model+": "+((d&&d.error&&d.error.message)||("HTTP "+r.status))+" (HTTP "+r.status+")"+(raw?" ["+String(typeof raw==="string"?raw:JSON.stringify(raw)).replace(/\s+/g," ").slice(0,200)+"]":""));
+  }
   const msg=d?.choices?.[0]?.message||{};
   const txt=String(msg.content||"")+"\n"+String(msg.reasoning||"");
   const m=txt.match(/\{[^{}]*"category"[\s\S]*?\}/);
@@ -339,7 +342,7 @@ function aiWait(ms,signal){
   });
 }
 // Hedged requests: start the first model now and add the next ones every few seconds; the first valid answer wins.
-async function aiEnrich(b){
+async function aiEnrich(b,maxModels){
   const key=process.env.OPENROUTER_API_KEY;
   if(!key) return null;
   const ids=Object.keys(KIVER_CATEGORIES);
@@ -349,7 +352,7 @@ async function aiEnrich(b){
   const gap=Number(process.env.KIVER_AI_STAGGER_MS)||6000;
   const ac=new AbortController(); const timer=setTimeout(()=>ac.abort(),32000);
   try{
-    return await Promise.any(AI_MODELS.map((m,i)=>aiWait(i*gap,ac.signal).then(()=>aiCall(m,key,system,user,ac.signal))));
+    return await Promise.any(AI_MODELS.slice(0,maxModels||AI_MODELS.length).map((m,i)=>aiWait(i*gap,ac.signal).then(()=>aiCall(m,key,system,user,ac.signal))));
   }catch(e){
     const errs=(e&&e.errors?e.errors.map(x=>x.message):[e.message]).filter(x=>x&&x!=="cancelled");
     throw new Error(errs.join(" | ")||"AI timed out");
@@ -379,18 +382,28 @@ async function retryMissingDescriptions(){
   describeBusy=true;
   try{
     const rows=await describeCall("missing");
-    for(const row of rows.slice(0,3)){
-      const n=describeTries.get(row.slug)||0; if(n>=8) continue;
-      describeTries.set(row.slug,n+1);
+    for(const row of rows.slice(0,2)){
+      const t=describeTries.get(row.slug)||{n:0,last:0};
+      if(t.n>=5||Date.now()-t.last<15*60*1000) continue;
+      describeTries.set(row.slug,{n:t.n+1,last:Date.now()});
       try{
-        const ai=await aiEnrich({name:row.name,about:row.about});
+        const ai=await aiEnrich({name:row.name,about:row.about},2);
         if(ai&&ai.description){ const out=await describeCall("set",{slug:row.slug,description:ai.description,category:ai.category}); console.log("Description added later for",row.slug,JSON.stringify(out)); }
-      }catch(e){ console.error("Retry description failed for",row.slug+" (try "+(n+1)+"):",e.message); }
+      }catch(e){ console.error("Retry description failed for",row.slug+" (try "+(t.n+1)+"/5):",e.message); }
     }
   }catch(e){ console.error("Description retry check failed:",e.message); }
   finally{ describeBusy=false; }
 }
 setTimeout(()=>{retryMissingDescriptions();setInterval(retryMissingDescriptions,4*60*1000)},90*1000);
+async function aiDiagnostics(){
+  try{
+    if(!process.env.OPENROUTER_API_KEY){ console.log("OpenRouter key is not set: AI descriptions are off."); return; }
+    const r=await fetch("https://openrouter.ai/api/v1/key",{headers:{authorization:"Bearer "+process.env.OPENROUTER_API_KEY}});
+    const x=((await r.json()).data)||{};
+    console.log("OpenRouter key check: free_tier="+x.is_free_tier+" usage="+x.usage+" limit="+x.limit+" remaining="+x.limit_remaining+" (HTTP "+r.status+")");
+  }catch(e){ console.error("OpenRouter key check failed:",e.message); }
+}
+setTimeout(aiDiagnostics,5000);
 
 async function processSubmission(chatId, link, ids) {
   const b=await inspectTelegramBot(link);
