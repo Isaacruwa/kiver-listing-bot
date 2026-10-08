@@ -317,7 +317,9 @@ function cleanDescription(d){
   const t=String(d||"").replace(/[\u0000-\u001f\u007f]+/g," ").replace(/\s+/g," ").trim();
   return t.length>=60 && t.length<=1500 ? t : "";
 }
-const AI_MODELS=process.env.KIVER_AI_MODEL?process.env.KIVER_AI_MODEL.split(",").map(x=>x.trim()).filter(Boolean):["inclusionai/ling-3.1-flash","google/gemma-4-26b-a4b-it:free","nvidia/nemotron-3.5-lightning:free","qwen/qwen3.8-27b:free","nvidia/nemotron-3-super-120b-a12b:free","google/gemma-4-31b-it:free"];
+// First model is the paid primary (billed to the OpenRouter key). The free models after it are only used when it fails or is slow.
+const AI_PRIMARY=process.env.KIVER_AI_PRIMARY||"google/gemini-2.5-flash-lite";
+const AI_MODELS=process.env.KIVER_AI_MODEL?process.env.KIVER_AI_MODEL.split(",").map(x=>x.trim()).filter(Boolean):[AI_PRIMARY,"inclusionai/ling-3.1-flash","google/gemma-4-26b-a4b-it:free","nvidia/nemotron-3.5-lightning:free","qwen/qwen3.8-27b:free","nvidia/nemotron-3-super-120b-a12b:free","google/gemma-4-31b-it:free"];
 async function aiCall(model,key,system,user,signal){
   const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{
     method:"POST",signal,
@@ -358,7 +360,15 @@ async function aiEnrich(b,opts){
   const gap=opts.gap!=null?opts.gap:(Number(process.env.KIVER_AI_STAGGER_MS)||2500);
   const ac=new AbortController(); const timer=setTimeout(()=>ac.abort(),opts.deadline||50000);
   try{
-    return await Promise.any(models.map((m,i)=>aiWait(i*gap,ac.signal).then(()=>aiCall(m,key,system,user,ac.signal))));
+    // The first model is the primary. The others start immediately if it fails, or after a wait if it is slow.
+    const primaryP=aiCall(models[0],key,system,user,ac.signal);
+    const wait=opts.primaryWait!=null?opts.primaryWait:12000;
+    const rest=models.slice(1);
+    const failP=rest.length?(async()=>{
+      await Promise.race([aiWait(wait,ac.signal),primaryP.then(()=>new Promise(()=>{}),()=>{})]);
+      return await Promise.any(rest.map((m,i)=>aiWait(i*gap,ac.signal).then(()=>aiCall(m,key,system,user,ac.signal))));
+    })():Promise.reject(new Error("no failover models"));
+    return await Promise.any([primaryP,failP]);
   }catch(e){
     const errs=(e&&e.errors?e.errors.map(x=>x.message):[e.message]).filter(x=>x&&x!=="cancelled");
     throw new Error(errs.join(" | ")||"AI timed out");
@@ -394,7 +404,7 @@ async function retryMissingDescriptions(){
       if(t.n>=12||Date.now()-t.last<wait) continue;
       describeTries.set(row.slug,{n:t.n+1,last:Date.now()});
       // Nobody is waiting here, so slow models are fine; rotate which models are tried on each attempt.
-      const pick=[0,1,2].map(k=>AI_MODELS[(t.n*2+k)%AI_MODELS.length]).filter((m,i,arr)=>arr.indexOf(m)===i);
+      const tail=AI_MODELS.slice(1),pick=[AI_MODELS[0]].concat(tail.length?[0,1].map(k=>tail[(t.n*2+k)%tail.length]):[]).filter((m,i,arr)=>arr.indexOf(m)===i);
       try{
         const ai=await aiEnrich({name:row.name,about:row.about},{models:pick,gap:8000,deadline:150000});
         if(ai&&ai.description){ const out=await describeCall("set",{slug:row.slug,description:ai.description,category:ai.category}); console.log("Description added later for",row.slug,JSON.stringify(out)); }
