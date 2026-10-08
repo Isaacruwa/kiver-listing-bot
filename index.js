@@ -473,10 +473,11 @@ async function poll() {
   let offset=0;
   try {
     while(true) {
-      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query"]});
+      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query"]});
       for(const u of updates) {
         offset=Math.max(offset,u.update_id+1);
         if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
+        if(u.inline_query){ handleInlineQuery(u.inline_query).catch(e=>console.error("Inline query failed:",e.message)); continue; }
         const msg=u.message;
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
         const text=msg.text.trim(), cid=msg.chat.id, key=String(cid);
@@ -573,6 +574,44 @@ async function handleAdminCallback(q){
   if(data==="admin_queue"){const rows=await adminApiAction("queue");await reply(chatId,"ANNOUNCEMENT QUEUE\n\n"+(rows.slice(0,20).map((x,i)=>(i+1)+". "+x.name+" (@"+(x.telegram_username||"")+")").join("\n")||"Queue is empty."),{ttl:ADMIN_TTL_MS});return}
   if(data==="admin_commands"){await reply(chatId,"ADMIN TOOLS\n\n/start — submission interface\n/registerchannel — announcement channel setup\nAdmin Panel — authenticated controls\nMini App — dashboard, listings, users, queue and controls\nAutomatic announcements — approved listings are posted to the configured Kiver channel",{ttl:ADMIN_TTL_MS});return}
  }catch(e){await reply(chatId,"Admin action failed.\n\n"+(e.message||"Please try again."),{ttl:ADMIN_TTL_MS})}
+}
+
+
+// ---- Inline search: type @thisbot <words> in any chat to find and share Kiver listings ----
+const inlineCache=new Map();
+async function inlineRows(q){
+  const key=q.toLowerCase(), hit=inlineCache.get(key);
+  if(hit && Date.now()-hit.at<30000) return hit.rows;
+  const rows=(await kiver("list",{q,sort:"top",limit:12,offset:0}))||[];
+  if(inlineCache.size>200) inlineCache.clear();
+  inlineCache.set(key,{at:Date.now(),rows});
+  return rows;
+}
+function inlineResult(r){
+  const kiverUrl="https://getkiver.com/bot/"+r.slug, tgUrl=r.telegram_url||("https://t.me/"+r.telegram_username);
+  const blurb=String(r.about||r.description||"").replace(/\s+/g," ").trim();
+  const text=[String(r.name||r.telegram_username).slice(0,120),"@"+r.telegram_username,blurb?blurb.slice(0,300):"",kiverUrl].filter(Boolean).join("\n\n");
+  return {
+    type:"article",id:String(r.slug).slice(0,64),
+    title:String(r.name||r.telegram_username).slice(0,100),
+    description:(blurb||"@"+r.telegram_username).slice(0,120),
+    thumbnail_url:"https://getkiver.com/api/image?u="+encodeURIComponent(r.telegram_username),
+    input_message_content:{message_text:text,link_preview_options:{is_disabled:true}},
+    reply_markup:{inline_keyboard:[[{text:"Open in Telegram",url:tgUrl},{text:"View on Kiver",url:kiverUrl}]]}
+  };
+}
+async function handleInlineQuery(iq){
+  const q=String(iq.query||"").trim().slice(0,60);
+  let results=[],cache=30;
+  try{
+    const rows=await inlineRows(q);
+    results=rows.slice(0,10).map(inlineResult);
+    if(!results.length && q){
+      results=[{type:"article",id:"none-"+Date.now().toString(36),title:"No bots found for “"+q.slice(0,40)+"”",description:"Tap to browse the whole Kiver directory",
+        input_message_content:{message_text:"Browse Telegram bots on Kiver:\nhttps://getkiver.com/directory?q="+encodeURIComponent(q)}}];
+    }
+  }catch(e){ console.error("Inline search failed:",e.message); cache=3; }
+  await tg("answerInlineQuery",{inline_query_id:iq.id,results,cache_time:cache,is_personal:false,button:{text:"List your bot on Kiver",start_parameter:"list"}});
 }
 
 http.createServer(async (req,res)=>{
