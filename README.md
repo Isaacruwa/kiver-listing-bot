@@ -46,3 +46,17 @@ Every new listing is posted to the main channel (`KIVER_CHANNEL_ID`, default `@g
 - **Manual:** `/registerchannel` with a public channel link does the same for a channel the bot already administers.
 - **Admins:** `/channels` lists the registered channels.
 - Channels are stored in Postgres (`mh_channels`), so they survive redeploys. A channel that rejects posts because the bot was kicked is dropped automatically. The registry holds up to `KIVER_MAX_CHANNELS` channels (default 100).
+
+
+## Buttons, "My bots" and paid featuring (Telegram Stars)
+
+The bot is button-driven: the main keyboard has **📋 My bots**, **⭐ Feature a bot** and **Admin Panel**, and the confirmation after a listing offers **⭐ Feature this listing**. No commands are needed (the old `/mybots`, `/feature` and `/alerts` still work).
+
+- Featured placement is paid in Telegram Stars (currency `XTR`, no payment provider needed): 7 days = `KIVER_STARS_7D` (default 300), 30 days = `KIVER_STARS_30D` (default 1000).
+- Only the person who listed a bot can buy for it, and a listing that is already featured by something else (such as a website plan) can never be bought.
+- Payments are stored (`mh_star_orders`). A failed fulfilment is retried and then refunded automatically. When time runs out, only a feature this bot switched on is switched off, and only if nobody changed it since.
+- Admins get a message for every sale and every refund. Withdraw Stars through Fragment from the bot's settings in Telegram.
+
+## Reliability
+
+Polling survives network errors (timeouts on every Telegram call, retry with backoff, a watchdog restarts the loop if it stops). `/health/polling` reports whether polling is alive.
