@@ -36,3 +36,13 @@ The person who lists a bot from the chat gets:
 Admin chats are never tracked: bots an admin lists create no alerts or data. An admin chat is remembered once it has entered the admin key.
 
 Data is stored in Postgres (`KIVER_MAKER_DB_URL`, tables `mh_*`, created automatically). If the variable is missing the feature stays off and everything else works as before. Tuning: `KIVER_HEALTH_INTERVAL_MIN` (default 20), `KIVER_DIGEST_DAYS` (default 7).
+
+
+## Extra channels
+
+Every new listing is posted to the main channel (`KIVER_CHANNEL_ID`, default `@getkiver`) and then to every registered channel, in the background.
+
+- **Automatic:** make the bot an administrator (with permission to post) in any channel and it registers that channel by itself. Removing the bot, or taking away its posting right, unregisters it.
+- **Manual:** `/registerchannel` with a public channel link does the same for a channel the bot already administers.
+- **Admins:** `/channels` lists the registered channels.
+- Channels are stored in Postgres (`mh_channels`), so they survive redeploys. A channel that rejects posts because the bot was kicked is dropped automatically. The registry holds up to `KIVER_MAX_CHANNELS` channels (default 100).

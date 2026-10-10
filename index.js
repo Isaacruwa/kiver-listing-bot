@@ -73,6 +73,10 @@ setInterval(()=>sweepExpired().catch(e=>console.error("Message cleanup failed:",
 // Maker health & growth (alerts and weekly report for the person who listed a bot). Off unless KIVER_MAKER_DB_URL is set.
 const makers=require("./lib/makers")({tg,kiver,reply,expireAt,msgTtlMs:MSG_TTL_MS,isAdminSession:id=>adminAuthed.has(String(id))});
 makers.start().catch(e=>console.error("Maker health failed to start:",e.message));
+// Extra channels that get every new listing (kept in Postgres so they survive redeploys).
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID});
+channels.start().catch(e=>console.error("Channel registry failed to start:",e.message));
 
 async function kiver(action, params={}, token=null) {
   const r = await fetch(KIVER_DB_URL, {
@@ -192,8 +196,12 @@ async function registerChannel(chatId,link){
   const member=await tg("getChatMember",{chat_id:chat.id,user_id:me.id});
   if(!["administrator","creator"].includes(member.status)){ await reply(chatId,"I am not an admin in that channel. Add this bot as an administrator, then run /registerchannel again.",{ttl:ADMIN_TTL_MS}); return; }
   const id=String(chat.id);
-  if(!state.channels.includes(id)){ state.channels.push(id); saveState(); }
-  await reply(chatId,"Channel registered.\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically.",{ttl:ADMIN_TTL_MS});
+  const res=await channels.add({id,title:chat.title,username:chat.username,addedBy:chatId});
+  if(res==="full"){ await reply(chatId,"The channel list is full right now, so I couldn't add that channel.",{ttl:ADMIN_TTL_MS}); return; }
+  if(res==="unavailable" && !state.channels.includes(id)){ state.channels.push(id); saveState(); } // database down: fall back to the local file
+  const said=res==="main"?"That is already the main Kiver channel.":res==="exists"?"That channel is already registered.":"Channel registered.";
+  await reply(chatId,said+"\n\n"+(chat.title||ref)+"\nNew Kiver listings will be posted there automatically.",{ttl:ADMIN_TTL_MS});
+  if(res!=="added" && res!=="unavailable") return;
   try {
     const latestRows=await kiver("list",{sort:"new",limit:1,offset:0});
     const latest=latestRows?.[0];
@@ -264,18 +272,54 @@ async function drainPendingAnnouncements(){
 async function announceListing(listing){
   const id=String(listing.id||"");
   if(!id||listing.channel_posted_at) return false;
-  const channels=KIVER_CHANNEL_ID?[KIVER_CHANNEL_ID]:state.channels.slice();
-  if(!channels.length) return false;
+  const main=KIVER_CHANNEL_ID||state.channels[0];
+  if(!main) return false;
   let posted=false;
-  for(const channelId of channels){
-    try{ await sendListingAnnouncement(channelId,listing); posted=true; }
-    catch(e){ console.error("Channel announcement failed for",channelId,e.message); }
-  }
+  try{ await sendListingAnnouncement(main,listing); posted=true; }
+  catch(e){ console.error("Channel announcement failed for",main,e.message); }
   if(posted){
     try{ await kiver("automationMarkChannelPosted",{automationSecret:KIVER_AUTOMATION_SECRET,id}); }
     catch(e){ console.error("Could not mark listing as channel-posted:",e.message); }
+    // Every registered channel gets it too, in the background so the person who listed is not kept waiting.
+    postToExtraChannels(listing).catch(e=>console.error("Extra channel posts failed:",e.message));
   }
   return posted;
+}
+
+async function postToExtraChannels(listing){
+  await channels.whenReady(); // right after a restart the registry may still be loading
+  const main=String(KIVER_CHANNEL_ID||"").toLowerCase();
+  const ids=[...new Set([...channels.list(),...state.channels])].filter(cid=>String(cid).toLowerCase()!==main);
+  for(const cid of ids){
+    try{ await sendListingAnnouncement(cid,listing); }
+    catch(e){
+      const m=String(e.message);
+      if(/kicked|not a member|chat not found|forbidden|not enough rights|have no rights|administrator rights|can't post/i.test(m)){
+        console.error("Dropping channel",cid,"-",m);
+        await channels.remove(cid);
+        const i=state.channels.indexOf(cid); if(i>=0){ state.channels.splice(i,1); saveState(); }
+      } else console.error("Channel post failed for",cid,m);
+    }
+    await sleep(1200);
+  }
+}
+
+// Telegram tells the bot when it is added to, or removed from, a channel.
+async function handleMyChatMember(u){
+  const c=u.chat; if(!c||c.type!=="channel") return;
+  const nm=u.new_chat_member||{}, id=String(c.id);
+  if(nm.status==="administrator" && nm.can_post_messages!==false){
+    const res=await channels.add({id,title:c.title,username:c.username,addedBy:u.from&&u.from.id});
+    if(res==="unavailable" && !state.channels.includes(id)){ state.channels.push(id); saveState(); }
+    if(res!=="added" && res!=="unavailable") return;
+    console.log("Registered channel:",c.title||id);
+    if(u.from&&u.from.id){ try{ await reply(u.from.id,"Channel registered.\n\n"+(c.title||id)+"\nNew Kiver listings will be posted there automatically.",{ttl:ADMIN_TTL_MS}); }catch(_){} }
+    try{ const rows=await kiver("list",{sort:"new",limit:1,offset:0}); if(rows&&rows[0]&&rows[0].id) await sendListingAnnouncement(id,rows[0]); }
+    catch(e){ console.error("Could not announce latest listing to new channel:",e.message); }
+  } else if(["left","kicked","member","restricted"].includes(nm.status) || (nm.status==="administrator" && nm.can_post_messages===false)){
+    if(await channels.remove(id)) console.log("Removed channel:",c.title||id);
+    const i=state.channels.indexOf(id); if(i>=0 && id!==KIVER_CHANNEL_ID){ state.channels.splice(i,1); saveState(); }
+  }
 }
 
 async function getPendingListings(){
@@ -286,10 +330,8 @@ async function postPendingListing(id){
   const listings=await getPendingListings();
   const listing=(listings||[]).find(x=>String(x?.id||"")===String(id));
   if(!listing) throw new Error("That listing is no longer pending.");
-  const channel=KIVER_CHANNEL_ID||state.channels[0];
-  if(!channel) throw new Error("No announcement channel is registered.");
-  await sendListingAnnouncement(channel,listing);
-  await kiver("automationMarkChannelPosted",{automationSecret:KIVER_AUTOMATION_SECRET,id:String(listing.id)});
+  const ok=await announceListing(listing);
+  if(!ok) throw new Error("Could not post to the Kiver channel.");
   return listing;
 }
 
@@ -473,10 +515,11 @@ async function poll() {
   let offset=0;
   try {
     while(true) {
-      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query"]});
+      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query","my_chat_member"]});
       for(const u of updates) {
         offset=Math.max(offset,u.update_id+1);
         if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
+        if(u.my_chat_member){ handleMyChatMember(u.my_chat_member).catch(e=>console.error("Channel update failed:",e.message)); continue; }
         if(u.inline_query){ handleInlineQuery(u.inline_query).catch(e=>console.error("Inline query failed:",e.message)); continue; }
         const msg=u.message;
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
@@ -499,6 +542,13 @@ async function poll() {
           continue;
         }
 
+        if(/^\/channels(?:@\w+)?\s*$/i.test(text)){
+          expireAt(cid,msg.message_id,ADMIN_TTL_MS);
+          if(!adminAuthed.has(key)){ await reply(cid,"That command is for admins. Tap Admin Panel to sign in first.",{ttl:ADMIN_TTL_MS}); continue; }
+          const t=channels.titles();
+          await reply(cid,"Channels receiving new listings\n\nMain: "+KIVER_CHANNEL_ID+"\n"+(t.length?t.map(([id,title],i)=>(i+1)+". "+title).join("\n"):"No extra channels yet.")+"\n\nAdd this bot as an admin in a channel and it joins the list automatically.",{ttl:ADMIN_TTL_MS});
+          continue;
+        }
         if(text === "Admin Panel"){
           expireAt(cid,msg.message_id,ADMIN_TTL_MS);
           if(adminAuthed.has(key)) await sendAdminMenu(cid);
