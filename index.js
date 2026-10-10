@@ -80,8 +80,13 @@ const makers=require("./lib/makers")({tg,kiver,reply,expireAt,msgTtlMs:MSG_TTL_M
 makers.start().catch(e=>console.error("Maker health failed to start:",e.message));
 // Extra channels that get every new listing (kept in Postgres so they survive redeploys).
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+// Main menu buttons (so makers never have to type commands).
+const MAIN_KEYBOARD={keyboard:[[{text:"📋 My bots"},{text:"⭐ Feature a bot"}],[{text:"Admin Panel"}]],resize_keyboard:true,is_persistent:true};
 const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID});
 channels.start().catch(e=>console.error("Channel registry failed to start:",e.message));
+// Paid featured placement with Telegram Stars, plus the My bots screen.
+const stars=require("./lib/stars")({tg,kiver,reply,expireAt,secret:KIVER_AUTOMATION_SECRET,makers,msgTtlMs:MSG_TTL_MS});
+stars.start().catch(e=>console.error("Stars payments failed to start:",e.message));
 
 async function kiver(action, params={}, token=null) {
   const r = await fetch(KIVER_DB_URL, {
@@ -507,7 +512,7 @@ async function processSubmission(chatId, link, ids) {
   const slug=listing?.slug;
   const publicUrl="https://getkiver.com/bot/"+slug;
   const tracked=await makers.enroll({chatId,slug,username:b.telegramUsername,name:b.name});
-  await reply(chatId,"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl+(tracked?"\n\nHealth alerts are on for this bot. Send /mybots to see it or /alerts off to stop.":""),{collect:ids});
+  await reply(chatId,"Listed on Kiver.\n\n"+b.name+"\nCategory: "+(KIVER_CATEGORIES[usedCategory]||"Other")+"\n"+publicUrl+(tracked?"\n\nHealth alerts are on for this bot. Tap 📋 My bots to manage them.":""),{collect:ids,extra:{disable_web_page_preview:true,reply_markup:{inline_keyboard:[...(tracked?[[{text:"⭐ Feature this listing",callback_data:"fs:"+stars.hash(slug)}]]:[]),[{text:"🌐 View on Kiver",url:publicUrl}]]}}});
 
   await announceListing({...listing,...b,slug});
 
@@ -522,7 +527,7 @@ async function poll() {
     while(true) {
       let updates;
       try {
-        updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query","my_chat_member"]});
+        updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query","my_chat_member","pre_checkout_query"]});
         backoff=1000; lastPollOk=Date.now();
       } catch(e) {
         // A dropped connection or a Telegram hiccup must never stop the bot: wait a little and try again.
@@ -532,10 +537,12 @@ async function poll() {
       }
       for(const u of updates) { try {
         offset=Math.max(offset,u.update_id+1);
-        if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
+        if(u.pre_checkout_query){ stars.preCheckout(u.pre_checkout_query).catch(e=>console.error("Pre-checkout failed:",e.message)); continue; }
+        if(u.callback_query){ if(await stars.callback(u.callback_query)) continue; await handleAdminCallback(u.callback_query); continue; }
         if(u.my_chat_member){ handleMyChatMember(u.my_chat_member).catch(e=>console.error("Channel update failed:",e.message)); continue; }
         if(u.inline_query){ handleInlineQuery(u.inline_query).catch(e=>console.error("Inline query failed:",e.message)); continue; }
         const msg=u.message;
+        if(msg && msg.successful_payment){ stars.paid(msg).catch(e=>console.error("Payment handling failed:",e.message)); continue; }
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
         const text=msg.text.trim(), cid=msg.chat.id, key=String(cid);
         if(/^\/registerchannel(?:\s|$)/i.test(text)){
@@ -552,7 +559,7 @@ async function poll() {
         if(/^\/start(?:\s|$)/i.test(text)) {
           // The /start command and this welcome reply are the only permanent messages in the chat.
           pendingChannelRegistration.delete(key);
-          await reply(cid,"Send only the Telegram bot link.\n\nE.x : https://t.me/getkiverbot",{keep:true,extra:{reply_markup:{keyboard:[[{text:"Admin Panel"}]],resize_keyboard:true}}});
+          await reply(cid,"<b>Welcome to Kiver</b> 👋\n\nSend me a Telegram bot link and I'll list it for you.\n\nExample: https://t.me/getkiverbot\n\nUse the buttons below to manage your bots.",{keep:true,extra:{parse_mode:"HTML",disable_web_page_preview:true,reply_markup:MAIN_KEYBOARD}});
           continue;
         }
 
@@ -563,6 +570,7 @@ async function poll() {
           await reply(cid,"Channels receiving new listings\n\nMain: "+KIVER_CHANNEL_ID+"\n"+(t.length?t.map(([id,title],i)=>(i+1)+". "+title).join("\n"):"No extra channels yet.")+"\n\nAdd this bot as an admin in a channel and it joins the list automatically.",{ttl:ADMIN_TTL_MS});
           continue;
         }
+        if(await stars.command(cid,text,msg)) continue;
         if(text === "Admin Panel"){
           expireAt(cid,msg.message_id,ADMIN_TTL_MS);
           if(adminAuthed.has(key)) await sendAdminMenu(cid);
@@ -592,7 +600,7 @@ async function poll() {
           // Link submission: the link, the progress note and the result all disappear together, MSG_TTL after the outcome.
           const ids=[msg.message_id];
           try {
-            await reply(cid,"Checking the Telegram bot and preparing its Kiver listing...",{collect:ids});
+            await reply(cid,"Checking the Telegram bot and preparing its Kiver listing...",{collect:ids,extra:{reply_markup:MAIN_KEYBOARD}});
             await processSubmission(cid,text,ids);
           } catch(e) {
             console.error(e);
