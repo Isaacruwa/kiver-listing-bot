@@ -27,12 +27,17 @@ if(KIVER_CHANNEL_ID && !state.channels.includes(KIVER_CHANNEL_ID)){ state.channe
 
 
 async function tg(method, body={}) {
-  const r = await fetch("https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/"+method, {
-    method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body)
-  });
-  const d = await r.json();
-  if (!d.ok) throw new Error(d.description || "Telegram API error");
-  return d.result;
+  const ctl = new AbortController();
+  const limit = Number(process.env.KIVER_TG_TIMEOUT_MS) || (method==="getUpdates" ? 45000 : 30000); // getUpdates waits up to 30s on purpose
+  const timer = setTimeout(()=>ctl.abort(), limit);
+  try {
+    const r = await fetch("https://api.telegram.org/bot"+TELEGRAM_TOKEN+"/"+method, {
+      method:"POST", headers:{"content-type":"application/json"}, body:JSON.stringify(body), signal:ctl.signal
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.description || "Telegram API error");
+    return d.result;
+  } finally { clearTimeout(timer); }
 }
 
 
@@ -508,15 +513,24 @@ async function processSubmission(chatId, link, ids) {
 
 }
 
-let running=false;
+let running=false, lastPollOk=Date.now();
 async function poll() {
   if(running) return;
   running=true;
-  let offset=0;
+  let offset=0, backoff=1000;
   try {
     while(true) {
-      const updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query","my_chat_member"]});
-      for(const u of updates) {
+      let updates;
+      try {
+        updates=await tg("getUpdates",{offset,timeout:30,limit:50,allowed_updates:["message","callback_query","inline_query","my_chat_member"]});
+        backoff=1000; lastPollOk=Date.now();
+      } catch(e) {
+        // A dropped connection or a Telegram hiccup must never stop the bot: wait a little and try again.
+        console.error("Polling error, retrying in "+Math.round(backoff/1000)+"s:",e.message);
+        await sleep(backoff); backoff=Math.min(backoff*2,30000);
+        continue;
+      }
+      for(const u of updates) { try {
         offset=Math.max(offset,u.update_id+1);
         if(u.callback_query){await handleAdminCallback(u.callback_query);continue;}
         if(u.my_chat_member){ handleMyChatMember(u.my_chat_member).catch(e=>console.error("Channel update failed:",e.message)); continue; }
@@ -585,10 +599,13 @@ async function poll() {
             try{ await reply(cid,"I couldn't create that listing.\n\n"+(e.message||"Please try another bot link."),{collect:ids}); }catch(_){}
           } finally { expireAt(cid,ids,MSG_TTL_MS); }
         })();
-      }
+      } catch(e) { console.error("Update handling failed:",e.message); } }
     }
   } finally { running=false; }
 }
+// Safety net: if the loop above ever stops for any reason, start it again.
+setInterval(()=>{ if(!running) { console.error("Polling was not running, restarting it."); poll().catch(e=>console.error(e)); } },30000);
+process.on("unhandledRejection",e=>console.error("Unhandled rejection:",e&&e.message?e.message:e));
 
 const MINI_APP_HTML = fs.readFileSync(path.join(__dirname,"admin.html"),"utf8")
 
@@ -666,6 +683,7 @@ async function handleInlineQuery(iq){
 
 http.createServer(async (req,res)=>{
   if(req.url==="/health"){res.writeHead(200,{"content-type":"text/plain"});return res.end("ok");}
+  if(req.url==="/health/polling"){const age=Math.round((Date.now()-lastPollOk)/1000);res.writeHead(age>180||!running?503:200,{"content-type":"application/json"});return res.end(JSON.stringify({running,secondsSinceLastPoll:age}));}
   if(req.url==="/miniapp"){res.writeHead(200,{"content-type":"text/html; charset=utf-8","cache-control":"no-store"});return res.end(MINI_APP_HTML);}
   if(req.url==="/admin/api"){
     const cors={"content-type":"application/json","cache-control":"no-store","access-control-allow-origin":"*","access-control-allow-methods":"POST,OPTIONS","access-control-allow-headers":"content-type,x-kiver-admin-key"};
