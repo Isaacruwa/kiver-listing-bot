@@ -46,10 +46,32 @@ async function tg(method, body={}) {
 // Only the /start command and the bot's welcome reply are permanent. Channel announcements are never touched.
 const MSG_TTL_MS=Math.max(5,Number(process.env.KIVER_MSG_TTL_SECONDS||90))*1000;          // normal chat: 1.5 min
 const ADMIN_TTL_MS=Math.max(5,Number(process.env.KIVER_ADMIN_MSG_TTL_SECONDS||150))*1000;  // admin panel: 2.5 min
+// How long things stay, by importance:
+//   never      /start and its welcome message, payment records (receipts, refunds, paid invoices, sale notices), channel posts
+//   at once    the admin key (deleted the moment it is processed)
+//   1.5 min    ordinary conversation: links, commands, replies, errors, anything the user sends that the bot ignores
+//   2.5 min    admin panel
+//   5-10 min   menus and unpaid invoices (people need time to choose and pay)
+//   24 h       reports and notices worth coming back to
+//   47 h       removal alerts (the longest Telegram allows a bot to delete)
+const MAX_TTL_MS=47*3600*1000; // Telegram only lets a bot delete messages younger than 48 hours
+const ALERT_TTL_MS=Math.max(5,Number(process.env.KIVER_ALERT_TTL_SECONDS||47*3600))*1000;
+const NOTICE_TTL_MS=Math.max(5,Number(process.env.KIVER_NOTICE_TTL_SECONDS||24*3600))*1000;
+const PERSIST_MIN_MS=Math.max(1,Number(process.env.KIVER_PERSIST_MIN_SECONDS||600))*1000; // long timers survive restarts (stored in Postgres)
 function expireAt(chatId,ids,ms){
-  const at=Date.now()+ms;
-  for(const m of [].concat(ids)) if(m) state.expiry.push({c:chatId,m,at});
+  ms=Math.min(ms,MAX_TTL_MS);
+  const at=Date.now()+ms, keep=ms>=PERSIST_MIN_MS, rows=[];
+  for(const m of [].concat(ids)) if(m){ state.expiry.push({c:chatId,m,at,p:keep?1:0}); if(keep) rows.push([chatId,m,at]); }
   saveState();
+  if(rows.length) persistExpiry(rows);
+}
+async function persistExpiry(rows){
+  try{ await expiryReady; for(const [c,m,at] of rows) await makers.query("INSERT INTO mh_expiry(chat_id,message_id,at) VALUES($1,$2,to_timestamp($3/1000.0)) ON CONFLICT (chat_id,message_id) DO UPDATE SET at=EXCLUDED.at",[c,m,at]); }
+  catch(e){ console.error("Could not store message expiry:",e.message); }
+}
+function cancelExpire(chatId,messageId){
+  state.expiry=state.expiry.filter(x=>!(String(x.c)===String(chatId)&&x.m===messageId)); saveState();
+  makers.query("DELETE FROM mh_expiry WHERE chat_id=$1 AND message_id=$2",[chatId,messageId]).catch(()=>{});
 }
 // Sends a message and schedules it for deletion. opts: {ttl, keep, collect:[...], extra:{...}}
 async function reply(chatId,text,opts={}){
@@ -66,18 +88,30 @@ async function sweepExpired(){
     const now=Date.now(), due=state.expiry.filter(x=>x.at<=now);
     if(!due.length) return;
     state.expiry=state.expiry.filter(x=>x.at>now); saveState();
+    const retry=[];
     for(const x of due){
       try{ await tg("deleteMessage",{chat_id:x.c,message_id:x.m}); }
-      catch(e){ if(/too many requests|retry after|fetch failed|timed? ?out|econn/i.test(String(e.message))) state.expiry.push({...x,at:Date.now()+15000}); } // already gone / not deletable: drop it
+      catch(e){ if(/too many requests|retry after|fetch failed|timed? ?out|econn|aborted/i.test(String(e.message))) { state.expiry.push({...x,at:Date.now()+15000}); retry.push(x); } } // already gone / not deletable: drop it
     }
     saveState();
+    const done=due.filter(x=>x.p&&!retry.includes(x)); // only long timers live in the database
+    if(done.length) makers.query("DELETE FROM mh_expiry WHERE (chat_id,message_id) IN (SELECT * FROM unnest($1::bigint[],$2::bigint[]))",[done.map(x=>x.c),done.map(x=>x.m)]).catch(()=>{});
   } finally { sweeping=false; }
 }
 setInterval(()=>sweepExpired().catch(e=>console.error("Message cleanup failed:",e.message)),2000);
 
 // Maker health & growth (alerts and weekly report for the person who listed a bot). Off unless KIVER_MAKER_DB_URL is set.
-const makers=require("./lib/makers")({tg,kiver,reply,expireAt,msgTtlMs:MSG_TTL_MS,isAdminSession:id=>adminAuthed.has(String(id))});
+const makers=require("./lib/makers")({tg,kiver,reply,expireAt,msgTtlMs:MSG_TTL_MS,alertTtlMs:ALERT_TTL_MS,noticeTtlMs:NOTICE_TTL_MS,isAdminSession:id=>adminAuthed.has(String(id))});
 makers.start().catch(e=>console.error("Maker health failed to start:",e.message));
+const expiryReady=(async()=>{ // long message timers survive restarts and redeploys
+  try{
+    if(!(await makers.isReady())) return;
+    await makers.query("CREATE TABLE IF NOT EXISTS mh_expiry (chat_id BIGINT NOT NULL, message_id BIGINT NOT NULL, at TIMESTAMPTZ NOT NULL, PRIMARY KEY (chat_id, message_id))");
+    const {rows}=await makers.query("SELECT chat_id, message_id, (extract(epoch from at)*1000)::bigint AS at FROM mh_expiry");
+    for(const r of rows){ const c=Number(r.chat_id), m=Number(r.message_id); if(!state.expiry.some(e=>Number(e.c)===c&&e.m===m)) state.expiry.push({c,m,at:Number(r.at),p:1}); }
+    if(rows.length){ saveState(); console.log("Restored "+rows.length+" pending message deletion"+(rows.length===1?"":"s")+"."); }
+  }catch(e){ console.error("Could not restore message deletions:",e.message); }
+})();
 // Extra channels that get every new listing (kept in Postgres so they survive redeploys).
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 // Main menu buttons (so makers never have to type commands).
@@ -85,7 +119,7 @@ const MAIN_KEYBOARD={keyboard:[[{text:"📋 My bots"},{text:"⭐ Feature a bot"}
 const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID});
 channels.start().catch(e=>console.error("Channel registry failed to start:",e.message));
 // Paid featured placement with Telegram Stars, plus the My bots screen.
-const stars=require("./lib/stars")({tg,kiver,reply,expireAt,secret:KIVER_AUTOMATION_SECRET,makers,msgTtlMs:MSG_TTL_MS});
+const stars=require("./lib/stars")({tg,kiver,reply,expireAt,cancelExpire,noticeTtlMs:NOTICE_TTL_MS,secret:KIVER_AUTOMATION_SECRET,makers,msgTtlMs:MSG_TTL_MS});
 stars.start().catch(e=>console.error("Stars payments failed to start:",e.message));
 
 async function kiver(action, params={}, token=null) {
@@ -543,8 +577,14 @@ async function poll() {
         if(u.inline_query){ handleInlineQuery(u.inline_query).catch(e=>console.error("Inline query failed:",e.message)); continue; }
         const msg=u.message;
         if(msg && msg.successful_payment){ stars.paid(msg).catch(e=>console.error("Payment handling failed:",e.message)); continue; }
+        if(msg && msg.chat?.type==="private" && !msg.text){ expireAt(msg.chat.id,msg.message_id,MSG_TTL_MS); continue; } // photos, stickers, voice, forwards...: keep the chat clean
         if(!msg || !msg.text || msg.chat?.type!=="private") continue;
         const text=msg.text.trim(), cid=msg.chat.id, key=String(cid);
+        if(KIVER_ADMIN_KEY && text===KIVER_ADMIN_KEY && !pendingAdminAuth.has(key)){ // a secret pasted outside the sign-in step: delete it immediately
+          try{ await tg("deleteMessage",{chat_id:cid,message_id:msg.message_id}); }catch(_){ expireAt(cid,msg.message_id,5000); }
+          await reply(cid,"For safety I deleted that message. Tap Admin Panel first, then send the key.",{ttl:ADMIN_TTL_MS});
+          continue;
+        }
         if(/^\/registerchannel(?:\s|$)/i.test(text)){
           expireAt(cid,msg.message_id,ADMIN_TTL_MS);
           const inline=text.replace(/^\/registerchannel\s*/i,"").trim();

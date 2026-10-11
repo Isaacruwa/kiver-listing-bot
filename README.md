@@ -60,3 +60,21 @@ The bot is button-driven: the main keyboard has **📋 My bots**, **⭐ Feature 
 ## Reliability
 
 Polling survives network errors (timeouts on every Telegram call, retry with backoff, a watchdog restarts the loop if it stops). `/health/polling` reports whether polling is alive.
+
+
+## What clears itself from the chat
+
+| Message | Stays for |
+|---|---|
+| `/start` and the welcome message | forever |
+| Payment records: receipts, refund notices, paid invoices, sale notices | forever |
+| Channel posts | forever |
+| The admin key | deleted the moment it is processed (also if pasted outside sign-in) |
+| Links, commands, replies, errors, and anything the user sends that the bot ignores (photos, stickers, voice) | 1.5 min (`KIVER_MSG_TTL_SECONDS`) |
+| Admin panel | 2.5 min (`KIVER_ADMIN_MSG_TTL_SECONDS`) |
+| Menus | 5 min |
+| Unpaid invoices | 10 min |
+| Weekly reports and notices | 24 h (`KIVER_NOTICE_TTL_SECONDS`) |
+| Removal and recovery alerts | 47 h (`KIVER_ALERT_TTL_SECONDS`), the longest Telegram lets a bot delete |
+
+A link, the "Checking..." note and the result are removed together, 1.5 min after the outcome. Timers of 10 minutes or more are stored in Postgres (`mh_expiry`), so they survive restarts and redeploys.
