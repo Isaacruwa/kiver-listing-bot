@@ -72,7 +72,7 @@ Polling survives network errors (timeouts on every Telegram call, retry with bac
 | The admin key | deleted the moment it is processed (also if pasted outside sign-in) |
 | Links, commands, replies, errors, and anything the user sends that the bot ignores (photos, stickers, voice) | 1.5 min (`KIVER_MSG_TTL_SECONDS`) |
 | Admin panel | 2.5 min (`KIVER_ADMIN_MSG_TTL_SECONDS`) |
-| Menus and the Featured / Top Apps lists | 5 min |
+| Menus and the Featured / Top lists | 5 min |
 | Unpaid invoices | 10 min |
 | Weekly reports and notices | 24 h (`KIVER_NOTICE_TTL_SECONDS`) |
 | Removal and recovery alerts | 47 h (`KIVER_ALERT_TTL_SECONDS`), the longest Telegram lets a bot delete |
@@ -82,4 +82,4 @@ A link, the "Checking..." note and the result are removed together, 1.5 min afte
 
 ## Menu
 
-Main keyboard: **🔥 Top Apps** (the 5 most upvoted and reviewed), **⭐ Featured Apps**, **📋 My bots**, **🚀 Promote a bot**, **Admin Panel**. Top Apps ranks by upvotes + reviews. Both lists are cached for 5 minutes.
+Main keyboard: **Top Bots/Apps** (the 5 most upvoted and reviewed), **Featured Mini apps**, **📋 My bots**, **⭐ Feature a bot**, **Admin Panel**. Top Apps ranks by upvotes + reviews. Both lists are cached for 5 minutes.

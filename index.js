@@ -115,7 +115,7 @@ const expiryReady=(async()=>{ // long message timers survive restarts and redepl
 // Extra channels that get every new listing (kept in Postgres so they survive redeploys).
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 // Main menu buttons (so makers never have to type commands).
-const MAIN_KEYBOARD={keyboard:[[{text:"🔥 Top Apps"},{text:"⭐ Featured Apps"}],[{text:"📋 My bots"},{text:"🚀 Promote a bot"}],[{text:"Admin Panel"}]],resize_keyboard:true,is_persistent:true};
+const MAIN_KEYBOARD={keyboard:[[{text:"Top Bots/Apps"},{text:"Featured Mini apps"}],[{text:"📋 My bots"},{text:"⭐ Feature a bot"}],[{text:"Admin Panel"}]],resize_keyboard:true,is_persistent:true};
 const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID});
 channels.start().catch(e=>console.error("Channel registry failed to start:",e.message));
 // Paid featured placement with Telegram Stars, plus the My bots screen.
