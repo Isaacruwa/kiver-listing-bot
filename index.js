@@ -6,6 +6,7 @@ const path = require("path");
 const PORT = Number(process.env.PORT || 10000);
 const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const KIVER_CHANNEL_ID = process.env.KIVER_CHANNEL_ID || "@getkiver";
+const UPDATES_CHANNEL = process.env.KIVER_UPDATES_CHANNEL || "@Botfixed"; // public "what's new" feed for this bot; never receives listings
 const KIVER_DB_URL = "https://ovxytcfhyzqtxzhsmmhn.supabase.co/functions/v1/kiver-db";
 const KIVER_API_KEY = Buffer.from("c2JfcHVibGlzaGFibGVfTTd3TlNaUzlVd3lQcHRJZEVwaEwyZ19JTG1aT3JYaQ==","base64").toString();
 
@@ -116,7 +117,7 @@ const expiryReady=(async()=>{ // long message timers survive restarts and redepl
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 // Main menu buttons (so makers never have to type commands).
 const MAIN_KEYBOARD={keyboard:[[{text:"Top Bots/Apps"},{text:"Featured Mini apps"}],[{text:"📋 My bots"},{text:"⭐ Feature a bot"}],[{text:"Admin Panel"}]],resize_keyboard:true,is_persistent:true};
-const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID});
+const channels=require("./lib/channels")({makers,mainChannel:KIVER_CHANNEL_ID,blocked:[UPDATES_CHANNEL]});
 channels.start().catch(e=>console.error("Channel registry failed to start:",e.message));
 // Paid featured placement with Telegram Stars, plus the My bots screen.
 // Public lists behind the menu buttons: Featured Apps and Top Apps.
@@ -243,6 +244,7 @@ async function registerChannel(chatId,link){
   if(!["administrator","creator"].includes(member.status)){ await reply(chatId,"I am not an admin in that channel. Add this bot as an administrator, then run /registerchannel again.",{ttl:ADMIN_TTL_MS}); return; }
   const id=String(chat.id);
   const res=await channels.add({id,title:chat.title,username:chat.username,addedBy:chatId});
+  if(res==="blocked"){ await reply(chatId,"That channel is reserved for Kiver bot updates, so it can't receive listings.",{ttl:ADMIN_TTL_MS}); return; }
   if(res==="full"){ await reply(chatId,"The channel list is full right now, so I couldn't add that channel.",{ttl:ADMIN_TTL_MS}); return; }
   if(res==="unavailable" && !state.channels.includes(id)){ state.channels.push(id); saveState(); } // database down: fall back to the local file
   const said=res==="main"?"That is already the main Kiver channel.":res==="exists"?"That channel is already registered.":"Channel registered.";
@@ -335,7 +337,7 @@ async function announceListing(listing){
 async function postToExtraChannels(listing){
   await channels.whenReady(); // right after a restart the registry may still be loading
   const main=String(KIVER_CHANNEL_ID||"").toLowerCase();
-  const ids=[...new Set([...channels.list(),...state.channels])].filter(cid=>String(cid).toLowerCase()!==main);
+  const ids=[...new Set([...channels.list(),...state.channels])].filter(cid=>String(cid).toLowerCase()!==main && !channels.isBlocked(cid));
   for(const cid of ids){
     try{ await sendListingAnnouncement(cid,listing); }
     catch(e){
@@ -354,6 +356,7 @@ async function postToExtraChannels(listing){
 async function handleMyChatMember(u){
   const c=u.chat; if(!c||c.type!=="channel") return;
   const nm=u.new_chat_member||{}, id=String(c.id);
+  if(channels.isBlocked(id,c.username)) return; // the updates channel is not a listings channel
   if(nm.status==="administrator" && nm.can_post_messages!==false){
     const res=await channels.add({id,title:c.title,username:c.username,addedBy:u.from&&u.from.id});
     if(res==="unavailable" && !state.channels.includes(id)){ state.channels.push(id); saveState(); }
@@ -511,6 +514,81 @@ async function aiDiagnostics(){
   }catch(e){ console.error("OpenRouter key check failed:",e.message); }
 }
 setTimeout(aiDiagnostics,5000);
+
+// ==== UPDATES FEED START ====
+// Posts short, public "what's new" notes about THIS bot (@getkiverbot) to the updates channel after each deploy.
+// Only commits of this repo are used, and only their short "Update:" lines (or a generic phrase). Nothing else is ever sent to that channel.
+const UPDATES_REPO=process.env.KIVER_UPDATES_REPO||"Isaacruwa/kiver-listing-bot";
+const SECRET_LIKE=/(sk-[a-z0-9_-]{8,}|eyJ[a-z0-9_-]{10,}|\b[a-f0-9]{32,}\b|\b\d{8,10}:[a-z0-9_-]{30,}\b|(api[_ -]?key|secret|token|password|passwd|bearer|authorization)\s*[:=]?\s*\S+|https?:\/\/\S+)/i;
+function publicLines(message){
+  if(/\[no-feed\]/i.test(String(message||""))) return []; // internal change, nothing to announce
+  const lines=String(message||"").split(/\r?\n/);
+  const out=[];
+  for(const l of lines){
+    const m=l.match(/^\s*(?:update|changelog)\s*:\s*(.+)$/i); if(!m) continue;
+    const t=m[1].replace(/\s+/g," ").trim().slice(0,140);
+    if(t.length>=3 && !SECRET_LIKE.test(t)) out.push(t);
+  }
+  if(out.length) return out;
+  const first=String(lines[0]||"").toLowerCase();
+  if(/\b(fix|fixed|fixes|bug|patch|resolve|resolved|crash)\b/.test(first)) return ["Bug fixed"];
+  if(/\b(add|added|new|feature|support)\b/.test(first)) return ["New feature added"];
+  if(/\b(style|design|ui|button|buttons|layout|splash|theme)\b/.test(first)) return ["Design updated"];
+  return ["Improvements made"];
+}
+function buildUpdateText(commits){
+  const seen=new Set(), items=[];
+  for(const c of commits){
+    if(c.parents&&c.parents.length>1) continue; // skip merge commits
+    for(const l of publicLines(c.commit&&c.commit.message)){ const k=l.toLowerCase(); if(!seen.has(k)){ seen.add(k); items.push(l); } }
+  }
+  if(!items.length) return null;
+  const shown=items.slice(0,8);
+  return "🔄 @getkiverbot update\n\n"+shown.map(x=>"• "+x).join("\n")+(items.length>8?"\n• …and more":"")+"\n\nSend /start to see what's new.";
+}
+async function ghJson(p){
+  const r=await fetch("https://api.github.com/repos/"+UPDATES_REPO+p,{headers:{"user-agent":"kiver-listing-bot","accept":"application/vnd.github+json"}});
+  if(!r.ok) throw new Error("GitHub HTTP "+r.status+" for "+p);
+  return r.json();
+}
+async function commitsToAnnounce(cur,last){
+  let list=null;
+  if(last){ try{ const cmp=await ghJson("/compare/"+last+"..."+cur); list=(cmp.commits||[]).slice(-15); }catch(e){ console.error("Update feed: compare failed, using latest commit only:",e.message); } }
+  if(!list) list=[await ghJson("/commits/"+cur)];
+  const keep=[];
+  for(const c of list){ // ignore commits that only touch docs or CI files
+    try{ const d=await ghJson("/commits/"+c.sha); const files=(d.files||[]).map(f=>f.filename); if(files.length&&files.every(f=>/^(README\.md|\.gitignore|\.github\/)/i.test(f))) continue; }catch(_){}
+    keep.push(c);
+  }
+  return keep;
+}
+async function postBotUpdate(text){ return tg("sendMessage",{chat_id:UPDATES_CHANNEL,text,disable_web_page_preview:true}); } // the only call that writes to the updates channel
+async function protectUpdatesChannel(){
+  try{ const c=await tg("getChat",{chat_id:UPDATES_CHANNEL}); const removed=await channels.block(String(c.id),c.username); console.log("Updates channel reserved: no listings are posted to "+UPDATES_CHANNEL+(removed?" (removed from the listing registry)":"")+"."); }
+  catch(e){ console.error("Could not resolve updates channel "+UPDATES_CHANNEL+":",e.message); }
+}
+async function announceBotUpdates(attempt){
+  const cur=process.env.RENDER_GIT_COMMIT;
+  if(!TELEGRAM_TOKEN||!cur) return;
+  if(!(await makers.isReady())){ if((attempt||0)<4) setTimeout(()=>announceBotUpdates((attempt||0)+1).catch(e=>console.error("Update feed error:",e.message)),60000); else console.log("Update feed: database not ready, skipped."); return; }
+  await makers.query("CREATE TABLE IF NOT EXISTS mh_update_feed (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())");
+  const got=await makers.query("SELECT v FROM mh_update_feed WHERE k='last_commit'");
+  const last=got.rows[0]?got.rows[0].v:null;
+  if(last===cur) return;
+  const setLast=v=>makers.query("INSERT INTO mh_update_feed(k,v) VALUES('last_commit',$1) ON CONFLICT (k) DO UPDATE SET v=$1, updated_at=now()",[v]);
+  await setLast(cur); // claim first so two instances starting together cannot both post
+  try{
+    const text=buildUpdateText(await commitsToAnnounce(cur,last));
+    if(text){ await postBotUpdate(text); console.log("Update feed: posted to "+UPDATES_CHANNEL+" ("+cur.slice(0,7)+")."); }
+    else console.log("Update feed: nothing public to post for "+cur.slice(0,7)+".");
+  }catch(e){
+    console.error("Update feed failed, will retry on the next start:",e.message);
+    if(last) await setLast(last).catch(()=>{}); else await makers.query("DELETE FROM mh_update_feed WHERE k='last_commit'").catch(()=>{});
+  }
+}
+setTimeout(()=>protectUpdatesChannel(),8000);
+setTimeout(()=>announceBotUpdates(0).catch(e=>console.error("Update feed error:",e.message)),25000);
+// ==== UPDATES FEED END ====
 
 async function processSubmission(chatId, link, ids) {
   const b=await inspectTelegramBot(link);
