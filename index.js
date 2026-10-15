@@ -539,28 +539,34 @@ function publicLines(message){
 function buildUpdateText(commits){
   const seen=new Set(), items=[];
   for(const c of commits){
-    if(c.parents&&c.parents.length>1) continue; // skip merge commits
-    for(const l of publicLines(c.commit&&c.commit.message)){ const k=l.toLowerCase(); if(!seen.has(k)){ seen.add(k); items.push(l); } }
+    for(const l of publicLines(c.message)){ const k=l.toLowerCase(); if(!seen.has(k)){ seen.add(k); items.push(l); } }
   }
   if(!items.length) return null;
   const shown=items.slice(0,8);
   return "🔄 @getkiverbot update\n\n"+shown.map(x=>"• "+x).join("\n")+(items.length>8?"\n• …and more":"")+"\n\nSend /start to see what's new.";
 }
-async function ghJson(p){
-  const r=await fetch("https://api.github.com/repos/"+UPDATES_REPO+p,{headers:{"user-agent":"kiver-listing-bot","accept":"application/vnd.github+json"}});
-  if(!r.ok) throw new Error("GitHub HTTP "+r.status+" for "+p);
-  return r.json();
+async function githubPatch(p){
+  const r=await fetch("https://github.com/"+UPDATES_REPO+p,{headers:{"user-agent":"kiver-listing-bot"},redirect:"follow"});
+  if(!r.ok) throw new Error("GitHub HTTP "+r.status+" for "+p.slice(0,60));
+  return (await r.text()).slice(0,3000000);
+}
+// Splits a git patch mailbox into commits: {message, files}.
+function parsePatches(text){
+  return String(text||"").split(/^From (?=[0-9a-f]{40} )/m).filter(x=>x.trim()).map(part=>{
+    const m=part.match(/\nSubject: ([\s\S]*?)\n---\n/);
+    const block=m?m[1]:"";
+    const cut=block.search(/\n\n/);
+    const subject=(cut<0?block:block.slice(0,cut)).replace(/\n\s+/g," ").replace(/^\[PATCH[^\]]*\]\s*/,"").replace(/=\?UTF-8\?[a-z]\?[^?]*\?=/gi,"").trim();
+    const body=cut<0?"":block.slice(cut+2);
+    const files=[...part.matchAll(/^diff --git a\/(\S+)/gm)].map(x=>x[1]);
+    return {message:subject+"\n\n"+body,files};
+  });
 }
 async function commitsToAnnounce(cur,last){
-  let list=null;
-  if(last){ try{ const cmp=await ghJson("/compare/"+last+"..."+cur); list=(cmp.commits||[]).slice(-15); }catch(e){ console.error("Update feed: compare failed, using latest commit only:",e.message); } }
-  if(!list) list=[await ghJson("/commits/"+cur)];
-  const keep=[];
-  for(const c of list){ // ignore commits that only touch docs or CI files
-    try{ const d=await ghJson("/commits/"+c.sha); const files=(d.files||[]).map(f=>f.filename); if(files.length&&files.every(f=>/^(README\.md|\.gitignore|\.github\/)/i.test(f))) continue; }catch(_){}
-    keep.push(c);
-  }
-  return keep;
+  let text=null;
+  if(last){ try{ text=await githubPatch("/compare/"+last+"..."+cur+".patch"); }catch(e){ console.error("Update feed: range lookup failed, using latest commit only:",e.message); } }
+  if(text==null) text=await githubPatch("/commit/"+cur+".patch");
+  return parsePatches(text).slice(-15).filter(c=>!(c.files.length&&c.files.every(f=>/^(README\.md|\.gitignore|\.github\/)/i.test(f)))); // docs/CI-only commits are not announced
 }
 async function postBotUpdate(text){ return tg("sendMessage",{chat_id:UPDATES_CHANNEL,text,disable_web_page_preview:true}); } // the only call that writes to the updates channel
 async function protectUpdatesChannel(){
