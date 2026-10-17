@@ -317,14 +317,18 @@ async function drainPendingAnnouncements(){
   }
 }
 
+const announcingIds=new Set(), announcedIds=new Set(); // in-flight / already posted in this process, so the periodic queue check never double-posts
 async function announceListing(listing){
   const id=String(listing.id||"");
   if(!id||listing.channel_posted_at) return false;
+  if(announcingIds.has(id)||announcedIds.has(id)) return false;
   const main=KIVER_CHANNEL_ID||state.channels[0];
   if(!main) return false;
+  announcingIds.add(id);
   let posted=false;
   try{ await sendListingAnnouncement(main,listing); posted=true; }
   catch(e){ console.error("Channel announcement failed for",main,e.message); }
+  finally{ announcingIds.delete(id); if(posted) announcedIds.add(id); }
   if(posted){
     try{ await kiver("automationMarkChannelPosted",{automationSecret:KIVER_AUTOMATION_SECRET,id}); }
     catch(e){ console.error("Could not mark listing as channel-posted:",e.message); }
@@ -849,5 +853,8 @@ http.createServer(async (req,res)=>{
   console.log("Kiver Listing Bot listening on "+PORT);
   tg("setChatMenuButton",{menu_button:{type:"web_app",text:"DISCOVER",web_app:{url:"https://www.getkiver.com/miniapp.html"}}}).catch(e=>console.error("Could not set Mini App menu button:",e.message));
   drainPendingAnnouncements().catch(e=>console.error(e));
+  // Website-submitted listings only appear in the pending queue, so check it regularly instead of only at startup.
+  let draining=false;
+  setInterval(()=>{ if(draining) return; draining=true; drainPendingAnnouncements().catch(e=>console.error(e)).finally(()=>{draining=false}); },2*60*1000);
   poll().catch(e=>console.error(e));
 });
