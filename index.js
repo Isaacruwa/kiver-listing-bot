@@ -198,7 +198,9 @@ async function inspectTelegramBot(link) {
   // Bots without an About get Telegram's auto text ("You can contact @name right away."); that is not a real About.
   const isPlaceholder=t=>!t||(/right away\.?$/i.test(t)&&t.toLowerCase().includes("@"+p.username.toLowerCase())&&t.length<90);
   const about=description||(isPlaceholder(ogAbout)?"":ogAbout);
-  const imageUrl=m["og:image"]||m["twitter:image"]||m["twitter:image:src"]||"";
+  // Bots without a profile photo get Telegram's generic logo as og:image; that is not a real photo.
+  const rawImage=m["og:image"]||m["twitter:image"]||m["twitter:image:src"]||"";
+  const imageUrl=/telegram\.org\/img\/t_logo/i.test(rawImage)?"":rawImage;
 
   return {
     telegramUsername:p.username,
