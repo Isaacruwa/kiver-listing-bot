@@ -122,8 +122,19 @@ channels.start().catch(e=>console.error("Channel registry failed to start:",e.me
 // Paid featured placement with Telegram Stars, plus the My bots screen.
 // Public lists behind the menu buttons: Featured Apps and Top Apps.
 const lists=require("./lib/lists")({kiver,reply,expireAt,msgTtlMs:MSG_TTL_MS});
-const stars=require("./lib/stars")({tg,kiver,reply,expireAt,cancelExpire,noticeTtlMs:NOTICE_TTL_MS,secret:KIVER_AUTOMATION_SECRET,makers,msgTtlMs:MSG_TTL_MS});
+const stars=require("./lib/stars")({tg,kiver,reply,expireAt,cancelExpire,noticeTtlMs:NOTICE_TTL_MS,secret:KIVER_AUTOMATION_SECRET,makers,msgTtlMs:MSG_TTL_MS,kiverStars});
 stars.start().catch(e=>console.error("Stars payments failed to start:",e.message));
+
+async function kiverStars(action, params={}) {
+  const r = await fetch(String(KIVER_DB_URL).replace(/\/kiver-db$/,"/kiver-stars"), {
+    method:"POST",
+    headers:{"content-type":"application/json","apikey":KIVER_API_KEY,"Authorization":"Bearer "+KIVER_API_KEY},
+    body:JSON.stringify({action,params})
+  });
+  const d = await r.json();
+  if (!r.ok || !d.ok) throw new Error(d.error || "Kiver request failed");
+  return d.result;
+}
 
 async function kiver(action, params={}, token=null) {
   const r = await fetch(KIVER_DB_URL, {
@@ -687,6 +698,9 @@ async function poll() {
           }
           continue;
         }
+
+        const webStart=text.match(/^\/start(?:@\w+)?\s+o_([A-Za-z0-9]{8,24})\s*$/i);
+        if(webStart){ pendingChannelRegistration.delete(key); await stars.startWeb(cid,webStart[1],msg); continue; }
 
         if(/^\/start(?:\s|$)/i.test(text)) {
           // The /start command and this welcome reply are the only permanent messages in the chat.
